@@ -1,0 +1,100 @@
+# Auto Crab - Desktop AI Assistant Configuration
+# 桌面 AI 助理配置文件
+
+[general]
+language = "zh-CN"          # zh-CN / en-US
+theme = "system"            # system / light / dark
+first_run = true
+
+# ============================================================
+# 模型配置
+# 支持: openai / anthropic / dashscope(通义) / deepseek /
+#       zhipu(智谱) / moonshot(Kimi) / ollama(本地)
+# ============================================================
+
+# 主模型 - 取消注释并填入你的配置
+# [models.primary]
+# provider = "dashscope"
+# model = "qwen-max"
+# api_key_ref = "keychain://dashscope"
+
+# 回退模型 - 主模型不可用时自动切换
+# [models.fallback]
+# provider = "ollama"
+# model = "qwen2.5:14b"
+# endpoint = "http://localhost:11434"
+
+# 编码专用模型
+# [models.coding]
+# provider = "deepseek"
+# model = "deepseek-coder-v3"
+# api_key_ref = "keychain://deepseek"
+
+# 智能路由 - 根据任务类型自动选模型
+# [models.routing]
+# coding = "deepseek-coder-v3"
+# writing = "qwen-max"
+# translation = "qwen-max"
+# general = "qwen-max"
+
+# ============================================================
+# Agent 配置
+# ============================================================
+
+[agent]
+name = "小蟹"
+personality = "professional"   # professional / friendly / concise
+max_context_tokens = 128000
+system_prompt = "你是 Auto Crab，一个安全、可控的桌面 AI 助理。你的操作需要经过用户审批。"
+
+# ============================================================
+# 安全配置 - 默认最高安全级别
+# ============================================================
+
+[security]
+master_password_required = true
+auto_lock_minutes = 15
+
+# 风险等级覆盖 (可选)
+# 默认风险分级已内置，这里只需覆盖你想调整的
+# [security.risk_overrides]
+# execute_shell = "moderate"    # 将 shell 从 dangerous 降为 moderate
+
+# ============================================================
+# 工具权限配置
+# ============================================================
+
+[tools]
+file_access = []              # 文件访问白名单，空=当前工作目录
+shell_enabled = true
+shell_allowed_commands = ["git", "npm", "pnpm", "python", "cargo", "node"]
+network_access = true
+network_allowed_domains = []  # 空=允许所有域名
+
+# ============================================================
+# 远程控制 (飞书 / 企业微信)
+# ============================================================
+
+[remote]
+enabled = false
+
+# [remote.feishu]
+# app_id = ""
+# app_secret_ref = "keychain://feishu-secret"
+# poll_interval_secs = 30
+# allowed_user_ids = []
+
+# [remote.wechat_work]
+# corp_id = ""
+# agent_id = ""
+# secret_ref = "keychain://wechat-work-secret"
+# poll_interval_secs = 30
+# allowed_user_ids = []
+
+# ============================================================
+# 定时任务 (默认关闭，与 OpenClaw 不同)
+# ============================================================
+
+[scheduled_tasks]
+enabled = false
+require_confirmation = true
