@@ -9,22 +9,7 @@
 
 - [x] Node.js v25.5.0 + pnpm 8.15.2
 - [x] Rust 1.94.0 + Cargo 1.94.0 (中科大镜像源)
-- [ ] **⚠️ Visual Studio Build Tools** — 需要手动安装，见下方说明
-
-### 安装 VS Build Tools (必需)
-
-在 **管理员 PowerShell** 中执行：
-
-```powershell
-# 如果已下载安装器:
-& "$env:TEMP\vs_BuildTools.exe" --add Microsoft.VisualStudio.Workload.VCTools --add Microsoft.VisualStudio.Component.Windows11SDK.22621 --includeRecommended --passive --wait --norestart
-
-# 或者从头下载安装:
-curl.exe -k -L -o "$env:TEMP\vs_BuildTools.exe" "https://aka.ms/vs/17/release/vs_BuildTools.exe"
-& "$env:TEMP\vs_BuildTools.exe" --add Microsoft.VisualStudio.Workload.VCTools --add Microsoft.VisualStudio.Component.Windows11SDK.22621 --includeRecommended --passive --wait --norestart
-```
-
-安装完成后重新打开终端，运行 `cargo check` 验证。
+- [x] Visual Studio Build Tools 2022 (C++ 桌面开发工作负载)
 
 ---
 
@@ -102,8 +87,9 @@ curl.exe -k -L -o "$env:TEMP\vs_BuildTools.exe" "https://aka.ms/vs/17/release/vs
 
 | 日期 | 完成任务 | 备注 |
 |------|---------|------|
-| 2026-03-14 | T-001 ~ T-018, T-021~T-022, T-024, T-026~T-027, T-033~T-037 | 项目骨架 + 核心模块代码全部创建，前端 TypeScript 编译通过 |
+| 2026-03-14 | T-001 ~ T-018, T-021~T-022, T-024, T-026~T-027, T-033~T-037 | 项目骨架 + 核心模块代码全部创建 |
+| 2026-03-14 | 环境搭建完成 | VS Build Tools 安装，cargo check 通过，pnpm tauri dev 应用成功启动 |
 
-## 当前阻塞项
+## 里程碑
 
-- ⚠️ VS Build Tools 未安装 → Rust 编译无法完成 → 需要手动以管理员权限运行安装器
+- ✅ 2026-03-14: VS Build Tools 安装完成，`cargo check` 零错误通过，`pnpm tauri dev` 应用成功启动
