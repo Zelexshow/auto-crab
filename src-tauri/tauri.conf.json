@@ -23,7 +23,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' https://*.openai.com https://*.anthropic.com https://*.dashscope.aliyuncs.com https://*.bigmodel.cn https://*.deepseek.com https://*.moonshot.cn https://localhost:*"
+      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' https://*.openai.com https://*.anthropic.com https://*.dashscope.aliyuncs.com https://*.bigmodel.cn https://*.deepseek.com https://*.moonshot.cn https://localhost:* http://localhost:* http://127.0.0.1:*"
     },
     "trayIcon": {
       "iconPath": "icons/icon.png",

@@ -147,6 +147,10 @@ impl Default for ToolsConfig {
             shell_allowed_commands: vec![
                 "git".into(), "npm".into(), "pnpm".into(),
                 "python".into(), "cargo".into(), "node".into(),
+                "cmd".into(), "powershell".into(), "pwsh".into(),
+                "echo".into(), "dir".into(), "ls".into(), "cat".into(),
+                "mkdir".into(), "cp".into(), "mv".into(), "rm".into(),
+                "type".into(), "where".into(), "whoami".into(),
             ],
             network_access: true,
             network_allowed_domains: vec![],
@@ -218,7 +222,23 @@ fn default_agent_name() -> String { "小蟹".into() }
 fn default_personality() -> String { "professional".into() }
 fn default_max_context() -> usize { 128000 }
 fn default_system_prompt() -> String {
-    "你是 Auto Crab，一个安全、可控的桌面 AI 助理。你的操作需要经过用户审批。".into()
+    let os_info = if cfg!(target_os = "windows") {
+        "当前操作系统是 Windows。桌面路径示例：C:\\Users\\用户名\\Desktop。\
+文件路径使用反斜杠或正斜杠均可。可用 ~ 表示用户主目录。\
+Shell 命令使用 cmd /C 执行。"
+    } else if cfg!(target_os = "macos") {
+        "当前操作系统是 macOS。桌面路径示例：~/Desktop。"
+    } else {
+        "当前操作系统是 Linux。桌面路径示例：~/Desktop。"
+    };
+    format!(
+        "你是 Auto Crab（小蟹），一个安全、可控的桌面 AI 助理。\
+你有能力使用工具来直接操作用户的电脑，包括读写文件(read_file/write_file/list_directory)、执行命令(execute_shell)等。\
+当用户要求你执行操作时，你必须调用提供的工具函数来完成，不要只用文字描述步骤。\
+{}\
+请用中文回复。",
+        os_info
+    )
 }
 fn default_true() -> bool { true }
 fn default_lock_minutes() -> u32 { 15 }

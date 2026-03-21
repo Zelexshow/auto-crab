@@ -1,9 +1,48 @@
 use crate::config;
-use crate::core::memory::{Conversation, ConversationSummary, MemoryStore, StoredMessage};
+use crate::core::memory::{Conversation, ConversationSummary, MemoryStore};
 use crate::models::provider::*;
 use crate::security::credentials::CredentialStore;
+use crate::tools::file_ops::FileOps;
+use crate::tools::shell::ShellExecutor;
+use crate::tools::registry::ToolRegistry;
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, Manager};
+use std::collections::HashMap;
+use std::path::PathBuf;
+use tauri::{AppHandle, Emitter, Manager, State};
+use std::sync::Mutex;
+use uuid::Uuid;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingApproval {
+    pub id: String,
+    pub operation: String,
+    pub risk_level: String,
+    pub description: String,
+    pub details: serde_json::Value,
+    pub created_at: String,
+}
+
+#[derive(Default)]
+pub struct ApprovalState {
+    pending: Mutex<HashMap<String, PendingApproval>>,
+}
+
+impl ApprovalState {
+    pub fn create(&self, approval: PendingApproval) {
+        let mut pending = self.pending.lock().expect("approval state poisoned");
+        pending.insert(approval.id.clone(), approval);
+    }
+
+    pub fn resolve(&self, id: &str) -> Option<PendingApproval> {
+        let mut pending = self.pending.lock().expect("approval state poisoned");
+        pending.remove(id)
+    }
+
+    pub fn list(&self) -> Vec<PendingApproval> {
+        let pending = self.pending.lock().expect("approval state poisoned");
+        pending.values().cloned().collect()
+    }
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ApiResult<T: Serialize> {
@@ -101,6 +140,68 @@ pub struct HistoryMessage {
     pub content: String,
 }
 
+/// Build tool definitions from the tool registry.
+pub fn build_tool_definitions() -> Vec<ToolDefinition> {
+    ToolRegistry::new().to_tool_definitions()
+}
+
+/// Execute a single tool call, returning its output as a string.
+pub async fn dispatch_tool(
+    tc: &ToolCall,
+    file_ops: &FileOps,
+    shell: &ShellExecutor,
+) -> String {
+    let args: serde_json::Value = serde_json::from_str(&tc.arguments)
+        .unwrap_or(serde_json::Value::Null);
+
+    match tc.name.as_str() {
+        "read_file" => {
+            let path = args["path"].as_str().unwrap_or("");
+            match file_ops.read_file(path).await {
+                Ok(c) if c.len() > 12000 => format!("{}…\n[已截断，共 {} 字符]", &c[..12000], c.len()),
+                Ok(c) => c,
+                Err(e) => format!("read_file 失败: {}", e),
+            }
+        }
+        "write_file" => {
+            let path = args["path"].as_str().unwrap_or("");
+            let content = args["content"].as_str().unwrap_or("");
+            match file_ops.write_file(path, content).await {
+                Ok(()) => format!("文件已写入: {}", path),
+                Err(e) => format!("write_file 失败: {}", e),
+            }
+        }
+        "list_directory" => {
+            let path = args["path"].as_str().unwrap_or(".");
+            match file_ops.list_directory(path).await {
+                Ok(entries) => entries.iter().map(|e| {
+                    if e.is_dir { format!("📁 {}/", e.name) }
+                    else { format!("📄 {} ({} bytes)", e.name, e.size) }
+                }).collect::<Vec<_>>().join("\n"),
+                Err(e) => format!("list_directory 失败: {}", e),
+            }
+        }
+        "execute_shell" => {
+            let command = args["command"].as_str().unwrap_or("");
+            let working_dir = args["working_directory"].as_str();
+            match shell.execute(command, working_dir).await {
+                Ok(output) => {
+                    let mut r = output.stdout.clone();
+                    if !output.stderr.is_empty() {
+                        if !r.is_empty() { r.push('\n'); }
+                        r.push_str("[stderr] ");
+                        r.push_str(&output.stderr);
+                    }
+                    r.push_str(&format!("\n[exit: {}]", output.exit_code));
+                    r
+                }
+                Err(e) => format!("execute_shell 失败: {}", e),
+            }
+        }
+        _ => format!("未知工具: {}", tc.name),
+    }
+}
+
 #[tauri::command]
 pub async fn chat_stream_start(
     app: AppHandle,
@@ -118,7 +219,7 @@ pub async fn chat_stream_start(
         Err(e) => return ApiResult::err(format!("Model router error: {}", e)),
     };
 
-    let stream_id = uuid::Uuid::new_v4().to_string();
+    let stream_id = Uuid::new_v4().to_string();
     let sid = stream_id.clone();
 
     let provider = match router.get_primary() {
@@ -127,8 +228,8 @@ pub async fn chat_stream_start(
     };
 
     tokio::spawn(async move {
-        use futures::StreamExt;
 
+        // ── Build initial messages ───────────────────────────────────────
         let mut messages = vec![ChatMessage {
             role: MessageRole::System,
             content: cfg.agent.system_prompt.clone(),
@@ -136,67 +237,133 @@ pub async fn chat_stream_start(
             tool_calls: None,
             tool_call_id: None,
         }];
-
         for h in &history {
             let role = match h.role.as_str() {
-                "user" => MessageRole::User,
                 "assistant" => MessageRole::Assistant,
-                "system" => MessageRole::System,
-                _ => MessageRole::User,
+                "system"    => MessageRole::System,
+                _           => MessageRole::User,
             };
-            messages.push(ChatMessage {
-                role,
-                content: h.content.clone(),
-                name: None,
-                tool_calls: None,
-                tool_call_id: None,
-            });
+            messages.push(ChatMessage { role, content: h.content.clone(), name: None, tool_calls: None, tool_call_id: None });
         }
-
         messages.push(ChatMessage {
             role: MessageRole::User,
-            content: message,
-            name: None,
-            tool_calls: None,
-            tool_call_id: None,
+            content: message.clone(),
+            name: None, tool_calls: None, tool_call_id: None,
         });
 
-        let chat_req = ChatRequest {
-            messages,
-            tools: None,
-            temperature: 0.7,
-            max_tokens: None,
-        };
+        // ── Build tool context ───────────────────────────────────────────
+        let file_roots: Vec<PathBuf> = cfg.tools.file_access.iter()
+            .map(|s| PathBuf::from(shellexpand::tilde(s).to_string()))
+            .collect();
+        let file_ops = FileOps::new(file_roots);
+        let shell = ShellExecutor::new(
+            cfg.tools.shell_enabled,
+            cfg.tools.shell_allowed_commands.clone(),
+        );
+        let tool_defs = build_tool_definitions();
 
-        match provider.chat_stream(chat_req).await {
-            Ok(mut stream) => {
-                while let Some(chunk_result) = stream.next().await {
-                    match chunk_result {
-                        Ok(chunk) => {
-                            let _ = window.emit("chat-stream-chunk", serde_json::json!({
-                                "stream_id": &sid,
-                                "delta": chunk.delta,
-                                "done": chunk.finish_reason.is_some(),
-                            }));
-                            if chunk.finish_reason.is_some() {
-                                break;
+        // ── Agent loop (max 8 tool-call rounds) ─────────────────────────
+        let max_rounds = 8usize;
+        for round in 0..=max_rounds {
+            let use_tools = round < max_rounds && cfg.tools.shell_enabled;
+            let req = ChatRequest {
+                messages: messages.clone(),
+                tools: if use_tools { Some(tool_defs.clone()) } else { None },
+                temperature: 0.7,
+                max_tokens: None,
+            };
+
+            // Use non-streaming for intermediate tool-call rounds,
+            // streaming only for the final answer round.
+            let has_pending_tool_calls = {
+                // check last call via non-streaming first
+                match provider.chat(req.clone()).await {
+                    Err(e) => {
+                        let _ = window.emit("chat-stream-error", serde_json::json!({
+                            "stream_id": &sid, "error": e.to_string()
+                        }));
+                        return;
+                    }
+                    Ok(resp) => {
+                        let tool_calls = resp.message.tool_calls.clone()
+                            .unwrap_or_default();
+                        if !tool_calls.is_empty() {
+                            // Emit agent-step for each tool call
+                            for tc in &tool_calls {
+                                let step_id = Uuid::new_v4().to_string();
+                                let _ = window.emit("agent-step", serde_json::json!({
+                                    "id": &step_id,
+                                    "stream_id": &sid,
+                                    "type": "tool_call",
+                                    "tool": &tc.name,
+                                    "content": &tc.arguments,
+                                    "status": "running",
+                                    "timestamp": chrono::Utc::now().timestamp_millis(),
+                                }));
+
+                                let result = dispatch_tool(tc, &file_ops, &shell).await;
+
+                                let _ = window.emit("agent-step", serde_json::json!({
+                                    "id": &step_id,
+                                    "stream_id": &sid,
+                                    "type": "tool_result",
+                                    "tool": &tc.name,
+                                    "content": &result,
+                                    "status": "done",
+                                    "timestamp": chrono::Utc::now().timestamp_millis(),
+                                }));
+
+                                // Add assistant tool-call message + tool result to history
+                                messages.push(ChatMessage {
+                                    role: MessageRole::Assistant,
+                                    content: String::new(),
+                                    name: None,
+                                    tool_calls: Some(vec![tc.clone()]),
+                                    tool_call_id: None,
+                                });
+                                messages.push(ChatMessage {
+                                    role: MessageRole::Tool,
+                                    content: result,
+                                    name: Some(tc.name.clone()),
+                                    tool_calls: None,
+                                    tool_call_id: Some(tc.id.clone()),
+                                });
                             }
-                        }
-                        Err(e) => {
-                            let _ = window.emit("chat-stream-error", serde_json::json!({
-                                "stream_id": &sid,
-                                "error": e.to_string(),
+                            true // continue agent loop
+                        } else {
+                            // Final answer: stream it
+                            let final_content = resp.message.content.clone();
+                            // Stream the content in chunks for smooth display
+                            let chars: Vec<char> = final_content.chars().collect();
+                            for chunk in chars.chunks(8) {
+                                let delta: String = chunk.iter().collect();
+                                let _ = window.emit("chat-stream-chunk", serde_json::json!({
+                                    "stream_id": &sid,
+                                    "delta": delta,
+                                    "done": false,
+                                }));
+                            }
+                            let _ = window.emit("chat-stream-chunk", serde_json::json!({
+                                "stream_id": &sid, "delta": "", "done": true,
                             }));
-                            break;
+                            let _ = window.emit("agent-done", serde_json::json!({ "stream_id": &sid }));
+                            false
                         }
                     }
                 }
+            };
+
+            if !has_pending_tool_calls {
+                break;
             }
-            Err(e) => {
-                let _ = window.emit("chat-stream-error", serde_json::json!({
+
+            if round == max_rounds {
+                let _ = window.emit("chat-stream-chunk", serde_json::json!({
                     "stream_id": &sid,
-                    "error": e.to_string(),
+                    "delta": "\n\n⚠️ 已达到最大工具调用轮次，操作停止。",
+                    "done": true,
                 }));
+                let _ = window.emit("agent-done", serde_json::json!({ "stream_id": &sid }));
             }
         }
     });
@@ -239,16 +406,87 @@ pub async fn get_audit_log(_limit: Option<usize>) -> ApiResult<Vec<serde_json::V
     ApiResult::ok(vec![])
 }
 
-#[tauri::command]
-pub async fn approve_operation(id: String) -> ApiResult<()> {
-    tracing::info!("Operation approved: {}", id);
-    ApiResult::ok(())
+pub fn create_remote_task_approval(
+    app: &AppHandle,
+    state: &ApprovalState,
+    user_id: &str,
+    task_text: &str,
+) -> PendingApproval {
+    let approval = PendingApproval {
+        id: uuid::Uuid::new_v4().to_string(),
+        operation: "remote_task".to_string(),
+        risk_level: "moderate".to_string(),
+        description: format!("远程任务执行审批（来自飞书用户 {}）", user_id),
+        details: serde_json::json!({
+            "source": "feishu",
+            "user_id": user_id,
+            "task_text": task_text,
+        }),
+        created_at: chrono::Utc::now().to_rfc3339(),
+    };
+
+    state.create(approval.clone());
+    let _ = app.emit("approval-request", approval.clone());
+    approval
+}
+
+pub fn approve_operation_internal(
+    state: &ApprovalState,
+    id: &str,
+) -> Result<PendingApproval, String> {
+    state
+        .resolve(id)
+        .ok_or_else(|| format!("No pending approval with id '{}'", id))
+}
+
+pub fn reject_operation_internal(
+    state: &ApprovalState,
+    id: &str,
+) -> Result<PendingApproval, String> {
+    state
+        .resolve(id)
+        .ok_or_else(|| format!("No pending approval with id '{}'", id))
 }
 
 #[tauri::command]
-pub async fn reject_operation(id: String, reason: Option<String>) -> ApiResult<()> {
-    tracing::info!("Operation rejected: {} (reason: {:?})", id, reason);
-    ApiResult::ok(())
+pub fn approve_operation(
+    state: State<'_, ApprovalState>,
+    id: String,
+) -> ApiResult<()> {
+    match approve_operation_internal(&state, &id) {
+        Ok(approval) => {
+            tracing::info!("Operation approved: {} ({})", id, approval.operation);
+            ApiResult::ok(())
+        }
+        Err(err) => ApiResult::err(err),
+    }
+}
+
+#[tauri::command]
+pub fn reject_operation(
+    state: State<'_, ApprovalState>,
+    id: String,
+    reason: Option<String>,
+) -> ApiResult<()> {
+    match reject_operation_internal(&state, &id) {
+        Ok(approval) => {
+            tracing::info!(
+                "Operation rejected: {} ({}) (reason: {:?})",
+                id,
+                approval.operation,
+                reason
+            );
+            ApiResult::ok(())
+        }
+        Err(err) => ApiResult::err(err),
+    }
+}
+
+#[tauri::command]
+pub fn list_pending_approvals(
+    state: State<'_, ApprovalState>,
+) -> ApiResult<Vec<PendingApproval>> {
+    ApiResult::ok(state.list())
 }
 
 #[tauri::command]

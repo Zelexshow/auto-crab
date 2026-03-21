@@ -7,12 +7,57 @@ mod remote;
 mod plugins;
 mod commands;
 
+use std::collections::HashMap;
 use tauri::{
     Manager,
     menu::{MenuBuilder, MenuItemBuilder},
     tray::TrayIconBuilder,
 };
+use tokio::sync::Mutex;
 use tracing_subscriber::{fmt, EnvFilter};
+
+const REMOTE_HISTORY_MAX_MESSAGES: usize = 20;
+
+#[derive(Default)]
+struct RemoteConversationState {
+    sessions: Mutex<HashMap<String, Vec<crate::models::provider::ChatMessage>>>,
+}
+
+impl RemoteConversationState {
+    async fn get_history(&self, session_key: &str) -> Vec<crate::models::provider::ChatMessage> {
+        let sessions = self.sessions.lock().await;
+        sessions.get(session_key).cloned().unwrap_or_default()
+    }
+
+    async fn append_turn(&self, session_key: &str, user: &str, assistant: &str) {
+        let mut sessions = self.sessions.lock().await;
+        let entry = sessions.entry(session_key.to_string()).or_default();
+        entry.push(crate::models::provider::ChatMessage {
+            role: crate::models::provider::MessageRole::User,
+            content: user.to_string(),
+            name: None,
+            tool_calls: None,
+            tool_call_id: None,
+        });
+        entry.push(crate::models::provider::ChatMessage {
+            role: crate::models::provider::MessageRole::Assistant,
+            content: assistant.to_string(),
+            name: None,
+            tool_calls: None,
+            tool_call_id: None,
+        });
+
+        if entry.len() > REMOTE_HISTORY_MAX_MESSAGES {
+            let overflow = entry.len() - REMOTE_HISTORY_MAX_MESSAGES;
+            entry.drain(0..overflow);
+        }
+    }
+
+    async fn clear(&self, session_key: &str) {
+        let mut sessions = self.sessions.lock().await;
+        sessions.remove(session_key);
+    }
+}
 
 fn build_remote_reply(text: &str) -> String {
     let cmd = text.trim();
@@ -35,32 +80,172 @@ fn build_remote_reply(text: &str) -> String {
 
 async fn run_remote_chat(
     cfg: &config::AppConfig,
+    history: &[crate::models::provider::ChatMessage],
     user_input: &str,
 ) -> anyhow::Result<String> {
+    use crate::models::provider::*;
+    use crate::tools::file_ops::FileOps;
+    use crate::tools::shell::ShellExecutor;
+
     let router = crate::models::ModelRouter::from_config(cfg)?;
-    let req = crate::models::provider::ChatRequest {
-        messages: vec![
-            crate::models::provider::ChatMessage {
-                role: crate::models::provider::MessageRole::System,
-                content: cfg.agent.system_prompt.clone(),
-                name: None,
-                tool_calls: None,
-                tool_call_id: None,
-            },
-            crate::models::provider::ChatMessage {
-                role: crate::models::provider::MessageRole::User,
-                content: user_input.to_string(),
-                name: None,
-                tool_calls: None,
-                tool_call_id: None,
-            },
-        ],
-        tools: None,
-        temperature: 0.7,
-        max_tokens: None,
-    };
-    let resp = router.chat_with_fallback(req).await?;
-    Ok(resp.message.content)
+    let provider = router.get_primary()
+        .ok_or_else(|| anyhow::anyhow!("No model provider configured"))?;
+
+    let mut messages = vec![ChatMessage {
+        role: MessageRole::System,
+        content: cfg.agent.system_prompt.clone(),
+        name: None, tool_calls: None, tool_call_id: None,
+    }];
+    messages.extend(history.iter().cloned());
+    messages.push(ChatMessage {
+        role: MessageRole::User,
+        content: user_input.to_string(),
+        name: None, tool_calls: None, tool_call_id: None,
+    });
+
+    let file_roots: Vec<std::path::PathBuf> = cfg.tools.file_access.iter()
+        .map(|s| std::path::PathBuf::from(shellexpand::tilde(s).to_string()))
+        .collect();
+    let file_ops = FileOps::new(file_roots);
+    let shell = ShellExecutor::new(
+        cfg.tools.shell_enabled,
+        cfg.tools.shell_allowed_commands.clone(),
+    );
+    let tool_defs = commands::build_tool_definitions();
+
+    for round in 0..=6usize {
+        let use_tools = round < 6 && cfg.tools.shell_enabled;
+        let req = ChatRequest {
+            messages: messages.clone(),
+            tools: if use_tools { Some(tool_defs.clone()) } else { None },
+            temperature: 0.7,
+            max_tokens: None,
+        };
+
+        let resp = provider.chat(req).await?;
+        let tool_calls = resp.message.tool_calls.clone().unwrap_or_default();
+
+        if !tool_calls.is_empty() {
+            for tc in &tool_calls {
+                let args_preview: String = tc.arguments.chars().take(120).collect();
+                tracing::info!("Remote tool call: {}({})", tc.name, args_preview);
+                let result = commands::dispatch_tool(tc, &file_ops, &shell).await;
+                let result_preview: String = result.chars().take(300).collect();
+                tracing::info!("Remote tool result: {}", result_preview);
+
+                messages.push(ChatMessage {
+                    role: MessageRole::Assistant,
+                    content: String::new(),
+                    name: None,
+                    tool_calls: Some(vec![tc.clone()]),
+                    tool_call_id: None,
+                });
+                messages.push(ChatMessage {
+                    role: MessageRole::Tool,
+                    content: result,
+                    name: Some(tc.name.clone()),
+                    tool_calls: None,
+                    tool_call_id: Some(tc.id.clone()),
+                });
+            }
+            continue;
+        }
+
+        return Ok(resp.message.content);
+    }
+
+    Ok("已达到最大工具调用轮次，操作停止。".to_string())
+}
+
+async fn handle_remote_control_command(
+    app: &tauri::AppHandle,
+    cfg: &config::AppConfig,
+    cmd: &remote::webhook_server::WebhookCommand,
+) -> String {
+    let session_key = format!("{}:{}", cmd.source, cmd.user_id);
+    let conv_state = app.state::<RemoteConversationState>();
+    match cmd.command_type.as_str() {
+        "status" => build_remote_reply("/status"),
+        "chat" => {
+            if cmd.text.trim().eq_ignore_ascii_case("/reset") {
+                conv_state.clear(&session_key).await;
+                return "已清空当前飞书会话上下文。".to_string();
+            }
+
+            let history = conv_state.get_history(&session_key).await;
+            match run_remote_chat(cfg, &history, &cmd.text).await {
+                Ok(answer) => {
+                    conv_state.append_turn(&session_key, &cmd.text, &answer).await;
+                    answer
+                }
+                Err(e) => format!("远程对话失败: {}", e),
+            }
+        }
+        ,
+        "task_create" => {
+            let state = app.state::<commands::ApprovalState>();
+            let task_text = cmd.text.trim();
+            if task_text.is_empty() {
+                return "用法：/task <任务描述>".to_string();
+            }
+            let approval = commands::create_remote_task_approval(app, &state, &cmd.user_id, task_text);
+            format!(
+                "🟡 任务已进入审批队列\nID: {}\n任务: {}\n\n发送 /approve {} 执行\n发送 /reject {} 拒绝",
+                approval.id, task_text, approval.id, approval.id
+            )
+        }
+        "approve" => {
+            let approval_id = cmd.text.split_whitespace().next().unwrap_or("");
+            if approval_id.is_empty() {
+                "用法：/approve <审批ID>".to_string()
+            } else {
+                let state = app.state::<commands::ApprovalState>();
+                match commands::approve_operation_internal(&state, approval_id) {
+                    Ok(approval) => {
+                        if approval.operation == "remote_task" {
+                            let task_text = approval
+                                .details
+                                .get("task_text")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            if task_text.is_empty() {
+                                return format!("审批 {} 已通过，但任务内容为空", approval_id);
+                            }
+
+                            let history = conv_state.get_history(&session_key).await;
+                            match run_remote_chat(cfg, &history, &task_text).await {
+                                Ok(answer) => {
+                                    conv_state.append_turn(&session_key, &task_text, &answer).await;
+                                    format!("✅ 审批已通过并执行任务\nID: {}\n\n{}", approval_id, answer)
+                                }
+                                Err(e) => format!("✅ 审批已通过，但任务执行失败\nID: {}\n错误: {}", approval_id, e),
+                            }
+                        } else {
+                            format!("已处理审批：{}", approval_id)
+                        }
+                    }
+                    Err(err) => format!("审批失败：{}", err),
+                }
+            }
+        }
+        "reject" => {
+            let mut parts = cmd.text.splitn(2, ' ');
+            let approval_id = parts.next().unwrap_or("").trim();
+            let reject_reason = parts.next().unwrap_or("from_feishu").trim().to_string();
+            if approval_id.is_empty() {
+                "用法：/reject <审批ID>".to_string()
+            } else {
+                let state = app.state::<commands::ApprovalState>();
+                match commands::reject_operation_internal(&state, approval_id) {
+                    Ok(_) => format!("已拒绝审批：{}\n原因：{}", approval_id, reject_reason),
+                    Err(err) => format!("拒绝失败：{}", err),
+                }
+            }
+        }
+        "task_cancel" => "已收到取消任务指令。当前版本将在后续接入任务队列后生效。".to_string(),
+        _ => build_remote_reply(&cmd.text),
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -74,6 +259,8 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .manage(commands::ApprovalState::default())
+        .manage(RemoteConversationState::default())
         .invoke_handler(tauri::generate_handler![
             commands::get_config,
             commands::save_config,
@@ -83,6 +270,7 @@ pub fn run() {
             commands::get_audit_log,
             commands::approve_operation,
             commands::reject_operation,
+            commands::list_pending_approvals,
             commands::store_credential,
             commands::delete_credential,
             commands::get_risk_level,
@@ -127,14 +315,7 @@ pub fn run() {
                                     );
                                     if cmd.source == "feishu" {
                                         if let Some(bot) = feishu_bot.as_mut() {
-                                            let reply = match cmd.command_type.as_str() {
-                                                "status" => build_remote_reply("/status"),
-                                                "chat" => match run_remote_chat(&cfg_for_remote, &cmd.text).await {
-                                                    Ok(answer) => answer,
-                                                    Err(e) => format!("远程对话失败: {}", e),
-                                                },
-                                                _ => build_remote_reply(&cmd.text),
-                                            };
+                                            let reply = handle_remote_control_command(&handle_clone, &cfg_for_remote, &cmd).await;
                                             if let Err(e) = bot.send_message(&cmd.user_id, &reply).await {
                                                 tracing::warn!(
                                                     "Failed to reply Feishu message to {}: {}",

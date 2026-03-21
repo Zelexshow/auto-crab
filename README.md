@@ -6,6 +6,10 @@
 
 ---
 
+## 文档索引
+
+- 飞书远程控制完整配置：`docs/feishu-setup.md`
+
 ## 快速启动
 
 ### 前置条件
@@ -168,11 +172,14 @@ allowed_user_ids = ["user_id_1"]
 ```
 
 远程指令格式：
-- 直接发文字 → AI 对话
+- 直接发文字 → AI 对话（按用户保留连续上下文）
 - `/status` → 查询状态
-- `/task 任务描述` → 创建任务
-- `/approve ID` → 批准操作
-- `/reject ID` → 拒绝操作
+- `/task 任务描述` → 创建审批任务（返回审批 ID）
+- `/approve ID` → 批准并执行任务
+- `/reject ID` → 拒绝任务
+- `/reset` → 清空当前远程会话上下文
+
+详细的飞书后台配置与排障步骤见：`docs/feishu-setup.md`
 
 ### 系统托盘
 

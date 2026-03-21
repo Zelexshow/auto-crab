@@ -1,6 +1,6 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Save, Key, Shield, Bot, Globe, Terminal, ChevronRight } from "lucide-react";
+import { Save, Key, Shield, Bot, Globe, Terminal, ChevronRight, Loader2 } from "lucide-react";
 
 const PROVIDERS = [
   { value: "", label: "未配置" },
@@ -15,14 +15,15 @@ const PROVIDERS = [
 
 export function SettingsView() {
   const [activeTab, setActiveTab] = useState<string>("models");
+  const [configLoaded, setConfigLoaded] = useState(false);
 
-  const [primaryProvider, setPrimaryProvider] = useState("dashscope");
-  const [primaryModel, setPrimaryModel] = useState("qwen-max");
-  const [fallbackProvider, setFallbackProvider] = useState("ollama");
-  const [fallbackModel, setFallbackModel] = useState("qwen2.5:14b");
+  const [primaryProvider, setPrimaryProvider] = useState("");
+  const [primaryModel, setPrimaryModel] = useState("");
+  const [fallbackProvider, setFallbackProvider] = useState("");
+  const [fallbackModel, setFallbackModel] = useState("");
   const [fallbackEndpoint, setFallbackEndpoint] = useState("http://localhost:11434");
-  const [codingProvider, setCodingProvider] = useState("deepseek");
-  const [codingModel, setCodingModel] = useState("deepseek-coder-v3");
+  const [codingProvider, setCodingProvider] = useState("");
+  const [codingModel, setCodingModel] = useState("");
 
   const [shellEnabled, setShellEnabled] = useState(true);
   const [shellCommands, setShellCommands] = useState("git, npm, pnpm, python, cargo, node");
@@ -44,6 +45,100 @@ export function SettingsView() {
   const [apiKeyInput, setApiKeyInput] = useState("");
   const [saving, setSaving] = useState(false);
   const [saveMsg, setSaveMsg] = useState("");
+  const [configSaving, setConfigSaving] = useState(false);
+  const [configSaveMsg, setConfigSaveMsg] = useState("");
+
+  // Load actual config on mount
+  useEffect(() => {
+    invoke<{ success: boolean; data?: any }>("get_config").then((res) => {
+      if (!res.success || !res.data) return;
+      const cfg = res.data;
+      if (cfg.models?.primary) {
+        setPrimaryProvider(cfg.models.primary.provider ?? "");
+        setPrimaryModel(cfg.models.primary.model ?? "");
+      }
+      if (cfg.models?.fallback) {
+        setFallbackProvider(cfg.models.fallback.provider ?? "");
+        setFallbackModel(cfg.models.fallback.model ?? "");
+        setFallbackEndpoint(cfg.models.fallback.endpoint ?? "http://localhost:11434");
+      }
+      if (cfg.models?.coding) {
+        setCodingProvider(cfg.models.coding.provider ?? "");
+        setCodingModel(cfg.models.coding.model ?? "");
+      }
+      if (cfg.tools) {
+        setShellEnabled(cfg.tools.shell_enabled ?? true);
+        setShellCommands((cfg.tools.shell_allowed_commands ?? []).join(", "));
+        setNetworkEnabled(cfg.tools.network_access ?? true);
+        setNetworkDomains((cfg.tools.network_allowed_domains ?? []).join(", "));
+        setFileAccess((cfg.tools.file_access ?? []).join(", "));
+      }
+      if (cfg.remote) {
+        setRemoteEnabled(cfg.remote.enabled ?? false);
+        if (cfg.remote.feishu) {
+          setFeishuAppId(cfg.remote.feishu.app_id ?? "");
+          setFeishuPollInterval(String(cfg.remote.feishu.poll_interval_secs ?? 30));
+          setFeishuAllowedUsers((cfg.remote.feishu.allowed_user_ids ?? []).join(", "));
+        }
+        if (cfg.remote.wechat_work) {
+          setWechatCorpId(cfg.remote.wechat_work.corp_id ?? "");
+          setWechatAgentId(cfg.remote.wechat_work.agent_id ?? "");
+          setWechatPollInterval(String(cfg.remote.wechat_work.poll_interval_secs ?? 30));
+        }
+      }
+      if (cfg.security) {
+        setAutoLockMin(String(cfg.security.auto_lock_minutes ?? 15));
+      }
+      setConfigLoaded(true);
+    }).catch(() => setConfigLoaded(true));
+  }, []);
+
+  const handleSaveConfig = async () => {
+    setConfigSaving(true);
+    setConfigSaveMsg("");
+    try {
+      const cfg: any = {
+        general: { language: "zh-CN", theme: "system", first_run: false },
+        models: {
+          routing: {},
+          primary: primaryProvider ? { provider: primaryProvider, model: primaryModel, api_key_ref: `keychain://${primaryProvider}` } : null,
+          fallback: fallbackProvider ? { provider: fallbackProvider, model: fallbackModel, ...(fallbackProvider === "ollama" ? { endpoint: fallbackEndpoint } : {}) } : null,
+          coding: codingProvider ? { provider: codingProvider, model: codingModel, api_key_ref: `keychain://${codingProvider}` } : null,
+        },
+        agent: { name: "小蟹", personality: "professional", max_context_tokens: 128000, system_prompt: "你是 Auto Crab（小蟹），一个安全、可控的桌面 AI 助理。请用中文回复。" },
+        security: { master_password_required: true, auto_lock_minutes: parseInt(autoLockMin) || 15, risk_overrides: {} },
+        tools: {
+          shell_enabled: shellEnabled,
+          shell_allowed_commands: shellCommands.split(",").map((s) => s.trim()).filter(Boolean),
+          network_access: networkEnabled,
+          network_allowed_domains: networkDomains.split(",").map((s) => s.trim()).filter(Boolean),
+          file_access: fileAccess.split(",").map((s) => s.trim()).filter(Boolean),
+        },
+        remote: {
+          enabled: remoteEnabled,
+          feishu: remoteEnabled && feishuAppId ? {
+            app_id: feishuAppId,
+            app_secret_ref: "keychain://feishu-secret",
+            poll_interval_secs: parseInt(feishuPollInterval) || 30,
+            allowed_user_ids: feishuAllowedUsers.split(",").map((s) => s.trim()).filter(Boolean),
+          } : null,
+          wechat_work: remoteEnabled && wechatCorpId ? {
+            corp_id: wechatCorpId,
+            agent_id: wechatAgentId,
+            secret_ref: "keychain://wechat-work-secret",
+            poll_interval_secs: parseInt(wechatPollInterval) || 30,
+            allowed_user_ids: [],
+          } : null,
+        },
+        scheduled_tasks: { enabled: false, require_confirmation: true, jobs: [] },
+      };
+      await invoke("save_config", { configData: cfg });
+      setConfigSaveMsg("✅ 配置已保存，重启应用后生效");
+    } catch (e: any) {
+      setConfigSaveMsg(`❌ 保存失败: ${e.toString()}`);
+    }
+    setConfigSaving(false);
+  };
 
   const handleSaveKey = async () => {
     if (!keyName || !apiKeyInput) return;
@@ -104,7 +199,13 @@ export function SettingsView() {
       </div>
 
       {/* Right content */}
-      <div className="flex-1 overflow-y-auto p-6">
+      <div className="flex-1 overflow-y-auto flex flex-col">
+        {!configLoaded ? (
+          <div className="flex-1 flex items-center justify-center gap-2" style={{ color: "var(--text-muted)" }}>
+            <Loader2 size={16} className="animate-spin" /> 加载配置中...
+          </div>
+        ) : (
+        <div className="flex-1 overflow-y-auto p-6">
         <div className="max-w-xl">
 
           {/* ============ 模型配置 ============ */}
@@ -371,6 +472,34 @@ export function SettingsView() {
           )}
 
         </div>
+        </div>
+        )}
+
+        {/* Bottom save bar (shown for non-credential tabs) */}
+        {configLoaded && activeTab !== "credentials" && (
+          <div
+            className="shrink-0 px-6 py-3 flex items-center gap-3 border-t"
+            style={{ borderColor: "var(--border)", background: "var(--bg-secondary)" }}
+          >
+            <button
+              onClick={handleSaveConfig}
+              disabled={configSaving}
+              className="flex items-center gap-1.5 px-4 py-1.5 rounded-md text-sm text-white transition-colors disabled:opacity-50"
+              style={{ background: "var(--accent)" }}
+            >
+              {configSaving ? <Loader2 size={13} className="animate-spin" /> : <Save size={13} />}
+              {configSaving ? "保存中..." : "保存配置"}
+            </button>
+            {configSaveMsg && (
+              <span className="text-xs" style={{ color: configSaveMsg.startsWith("✅") ? "var(--success)" : "var(--danger)" }}>
+                {configSaveMsg}
+              </span>
+            )}
+            <span className="text-xs ml-auto" style={{ color: "var(--text-muted)" }}>
+              部分配置（远程控制、工具权限）需重启应用后生效
+            </span>
+          </div>
+        )}
       </div>
     </div>
   );

@@ -134,7 +134,28 @@ struct ApiRequest {
 #[derive(Serialize, Deserialize)]
 struct ApiMessage {
     role: String,
-    content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_calls: Option<Vec<ApiToolCallOut>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_call_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+struct ApiToolCallOut {
+    id: String,
+    #[serde(rename = "type")]
+    call_type: String,
+    function: ApiFunctionOut,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+struct ApiFunctionOut {
+    name: String,
+    arguments: String,
 }
 
 #[derive(Deserialize)]
@@ -193,15 +214,41 @@ fn role_to_str(role: &MessageRole) -> &str {
 #[async_trait]
 impl ModelProvider for OpenAICompatProvider {
     async fn chat(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
-        let messages: Vec<ApiMessage> = request.messages.iter().map(|m| ApiMessage {
-            role: role_to_str(&m.role).into(),
-            content: m.content.clone(),
+        let messages: Vec<ApiMessage> = request.messages.iter().map(|m| {
+            let tool_calls_out = m.tool_calls.as_ref().map(|tcs| {
+                tcs.iter().map(|tc| ApiToolCallOut {
+                    id: tc.id.clone(),
+                    call_type: "function".into(),
+                    function: ApiFunctionOut {
+                        name: tc.name.clone(),
+                        arguments: tc.arguments.clone(),
+                    },
+                }).collect()
+            });
+            ApiMessage {
+                role: role_to_str(&m.role).into(),
+                content: if m.content.is_empty() && m.tool_calls.is_some() { None } else { Some(m.content.clone()) },
+                tool_calls: tool_calls_out,
+                tool_call_id: m.tool_call_id.clone(),
+                name: m.name.clone(),
+            }
         }).collect();
+
+        let openai_tools: Option<Vec<serde_json::Value>> = request.tools.as_ref().map(|defs| {
+            defs.iter().map(|d| serde_json::json!({
+                "type": "function",
+                "function": {
+                    "name": d.name,
+                    "description": d.description,
+                    "parameters": d.parameters,
+                }
+            })).collect()
+        });
 
         let api_req = ApiRequest {
             model: self.config.model.clone(),
             messages,
-            tools: None,
+            tools: openai_tools,
             temperature: Some(request.temperature),
             max_tokens: request.max_tokens,
             stream: false,
@@ -261,9 +308,14 @@ impl ModelProvider for OpenAICompatProvider {
     }
 
     async fn chat_stream(&self, request: ChatRequest) -> anyhow::Result<ChatStream> {
-        let messages: Vec<ApiMessage> = request.messages.iter().map(|m| ApiMessage {
-            role: role_to_str(&m.role).into(),
-            content: m.content.clone(),
+        let messages: Vec<ApiMessage> = request.messages.iter().map(|m| {
+            ApiMessage {
+                role: role_to_str(&m.role).into(),
+                content: if m.content.is_empty() && m.tool_calls.is_some() { None } else { Some(m.content.clone()) },
+                tool_calls: None,
+                tool_call_id: m.tool_call_id.clone(),
+                name: m.name.clone(),
+            }
         }).collect();
 
         let api_req = ApiRequest {

@@ -33,14 +33,19 @@ impl FileOps {
         );
     }
 
+    fn expand_path(path: &str) -> PathBuf {
+        let expanded = shellexpand::tilde(path).to_string();
+        PathBuf::from(expanded)
+    }
+
     pub async fn read_file(&self, path: &str) -> Result<String> {
-        let path = self.check_access(Path::new(path))?;
+        let path = self.check_access(&Self::expand_path(path))?;
         let content = fs::read_to_string(&path).await?;
         Ok(content)
     }
 
     pub async fn write_file(&self, path: &str, content: &str) -> Result<()> {
-        let path = self.check_access(Path::new(path))?;
+        let path = self.check_access(&Self::expand_path(path))?;
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).await?;
         }
@@ -49,7 +54,7 @@ impl FileOps {
     }
 
     pub async fn list_directory(&self, path: &str) -> Result<Vec<FileEntry>> {
-        let path = self.check_access(Path::new(path))?;
+        let path = self.check_access(&Self::expand_path(path))?;
         let mut entries = Vec::new();
         let mut dir = fs::read_dir(&path).await?;
 
@@ -71,7 +76,7 @@ impl FileOps {
     }
 
     pub async fn delete_file(&self, path: &str) -> Result<()> {
-        let path = self.check_access(Path::new(path))?;
+        let path = self.check_access(&Self::expand_path(path))?;
         fs::remove_file(&path).await?;
         Ok(())
     }
