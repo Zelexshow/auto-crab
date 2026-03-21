@@ -1,6 +1,7 @@
 @import "tailwindcss";
 
-:root {
+:root,
+[data-theme="light"] {
   --bg-primary: #ffffff;
   --bg-secondary: #f8fafc;
   --bg-tertiary: #f1f5f9;
@@ -17,20 +18,18 @@
   --assistant-bubble: #f1f5f9;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg-primary: #0f172a;
-    --bg-secondary: #1e293b;
-    --bg-tertiary: #334155;
-    --text-primary: #f1f5f9;
-    --text-secondary: #94a3b8;
-    --text-muted: #64748b;
-    --border: #334155;
-    --accent: #38bdf8;
-    --accent-hover: #0ea5e9;
-    --user-bubble: #0284c7;
-    --assistant-bubble: #1e293b;
-  }
+[data-theme="dark"] {
+  --bg-primary: #0f172a;
+  --bg-secondary: #1e293b;
+  --bg-tertiary: #334155;
+  --text-primary: #f1f5f9;
+  --text-secondary: #94a3b8;
+  --text-muted: #64748b;
+  --border: #334155;
+  --accent: #38bdf8;
+  --accent-hover: #0ea5e9;
+  --user-bubble: #0284c7;
+  --assistant-bubble: #1e293b;
 }
 
 * {
@@ -63,4 +62,33 @@ html, body, #root {
 
 ::-webkit-scrollbar-thumb:hover {
   background: var(--text-secondary);
+}
+
+.chat-markdown p {
+  margin: 0;
+}
+.chat-markdown p + p {
+  margin-top: 0.5em;
+}
+.chat-markdown ul, .chat-markdown ol {
+  padding-left: 1.2em;
+  margin: 4px 0;
+}
+.chat-markdown li {
+  margin: 2px 0;
+}
+.chat-markdown h1, .chat-markdown h2, .chat-markdown h3 {
+  margin: 8px 0 4px;
+  font-weight: 600;
+}
+.chat-markdown h1 { font-size: 1.1em; }
+.chat-markdown h2 { font-size: 1.05em; }
+.chat-markdown h3 { font-size: 1em; }
+.chat-markdown hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 8px 0;
+}
+[data-theme="dark"] .inline-code {
+  background: rgba(255,255,255,0.12) !important;
 }

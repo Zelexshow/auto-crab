@@ -1,31 +1,37 @@
+import { useState, useEffect } from "react";
 import { Sidebar } from "./components/Sidebar/Sidebar";
 import { ChatView } from "./components/Chat/ChatView";
 import { SettingsView } from "./components/Settings/SettingsView";
+import { AuditLogView } from "./components/AuditLog/AuditLogView";
+import { ApprovalDialog } from "./components/ApprovalDialog/ApprovalDialog";
+import { OnboardingWizard } from "./components/Onboarding/OnboardingWizard";
 import { useAppStore } from "./stores/appStore";
-import { clsx } from "clsx";
 
 function App() {
-  const { currentView, sidebarOpen } = useAppStore();
+  const { currentView } = useAppStore();
+  const [showOnboarding, setShowOnboarding] = useState(false);
+
+  useEffect(() => {
+    const hasCompleted = localStorage.getItem("auto-crab-onboarded");
+    if (!hasCompleted) {
+      setShowOnboarding(true);
+    }
+  }, []);
+
+  const handleOnboardingComplete = () => {
+    localStorage.setItem("auto-crab-onboarded", "true");
+    setShowOnboarding(false);
+  };
 
   return (
     <div className="flex h-screen overflow-hidden" style={{ background: "var(--bg-primary)" }}>
+      {showOnboarding && <OnboardingWizard onComplete={handleOnboardingComplete} />}
+      <ApprovalDialog />
       <Sidebar />
-      <main
-        className={clsx(
-          "flex-1 flex flex-col transition-all duration-200 overflow-hidden",
-          sidebarOpen ? "ml-0" : "ml-0",
-        )}
-      >
+      <main className="flex-1 flex flex-col overflow-hidden">
         {currentView === "chat" && <ChatView />}
         {currentView === "settings" && <SettingsView />}
-        {currentView === "audit" && (
-          <div className="flex-1 flex items-center justify-center" style={{ color: "var(--text-muted)" }}>
-            <div className="text-center">
-              <p className="text-lg font-medium">审计日志</p>
-              <p className="text-sm mt-2">此功能正在开发中</p>
-            </div>
-          </div>
-        )}
+        {currentView === "audit" && <AuditLogView />}
       </main>
     </div>
   );

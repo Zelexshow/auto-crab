@@ -1,8 +1,9 @@
 use crate::config;
+use crate::core::memory::{Conversation, ConversationSummary, MemoryStore, StoredMessage};
 use crate::models::provider::*;
 use crate::security::credentials::CredentialStore;
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ApiResult<T: Serialize> {
@@ -94,10 +95,17 @@ pub async fn chat_send(app: AppHandle, request: ChatSendRequest) -> ApiResult<Ch
     }
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct HistoryMessage {
+    pub role: String,
+    pub content: String,
+}
+
 #[tauri::command]
 pub async fn chat_stream_start(
     app: AppHandle,
     message: String,
+    history: Vec<HistoryMessage>,
     window: tauri::Window,
 ) -> ApiResult<String> {
     let cfg = match config::load_config(&app).await {
@@ -121,23 +129,40 @@ pub async fn chat_stream_start(
     tokio::spawn(async move {
         use futures::StreamExt;
 
+        let mut messages = vec![ChatMessage {
+            role: MessageRole::System,
+            content: cfg.agent.system_prompt.clone(),
+            name: None,
+            tool_calls: None,
+            tool_call_id: None,
+        }];
+
+        for h in &history {
+            let role = match h.role.as_str() {
+                "user" => MessageRole::User,
+                "assistant" => MessageRole::Assistant,
+                "system" => MessageRole::System,
+                _ => MessageRole::User,
+            };
+            messages.push(ChatMessage {
+                role,
+                content: h.content.clone(),
+                name: None,
+                tool_calls: None,
+                tool_call_id: None,
+            });
+        }
+
+        messages.push(ChatMessage {
+            role: MessageRole::User,
+            content: message,
+            name: None,
+            tool_calls: None,
+            tool_call_id: None,
+        });
+
         let chat_req = ChatRequest {
-            messages: vec![
-                ChatMessage {
-                    role: MessageRole::System,
-                    content: cfg.agent.system_prompt.clone(),
-                    name: None,
-                    tool_calls: None,
-                    tool_call_id: None,
-                },
-                ChatMessage {
-                    role: MessageRole::User,
-                    content: message,
-                    name: None,
-                    tool_calls: None,
-                    tool_call_id: None,
-                },
-            ],
+            messages,
             tools: None,
             temperature: 0.7,
             max_tokens: None,
@@ -247,4 +272,45 @@ pub fn get_risk_level(operation: String) -> ApiResult<String> {
     let engine = crate::security::risk::RiskEngine::new(std::collections::HashMap::new());
     let level = engine.assess(&operation);
     ApiResult::ok(format!("{:?}", level))
+}
+
+fn get_memory_store(app: &AppHandle) -> MemoryStore {
+    let data_dir = app.path().app_data_dir().expect("failed to resolve app data dir");
+    MemoryStore::new(data_dir)
+}
+
+#[tauri::command]
+pub async fn save_conversation(app: AppHandle, conversation: Conversation) -> ApiResult<()> {
+    let store = get_memory_store(&app);
+    match store.save_conversation(&conversation).await {
+        Ok(()) => ApiResult::ok(()),
+        Err(e) => ApiResult::err(format!("Failed to save conversation: {}", e)),
+    }
+}
+
+#[tauri::command]
+pub async fn load_conversation(app: AppHandle, id: String) -> ApiResult<Conversation> {
+    let store = get_memory_store(&app);
+    match store.load_conversation(&id).await {
+        Ok(conv) => ApiResult::ok(conv),
+        Err(e) => ApiResult::err(format!("Failed to load conversation: {}", e)),
+    }
+}
+
+#[tauri::command]
+pub async fn list_conversations(app: AppHandle) -> ApiResult<Vec<ConversationSummary>> {
+    let store = get_memory_store(&app);
+    match store.list_conversations().await {
+        Ok(list) => ApiResult::ok(list),
+        Err(e) => ApiResult::err(format!("Failed to list conversations: {}", e)),
+    }
+}
+
+#[tauri::command]
+pub async fn delete_conversation(app: AppHandle, id: String) -> ApiResult<()> {
+    let store = get_memory_store(&app);
+    match store.delete_conversation(&id).await {
+        Ok(()) => ApiResult::ok(()),
+        Err(e) => ApiResult::err(format!("Failed to delete conversation: {}", e)),
+    }
 }

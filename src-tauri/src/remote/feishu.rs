@@ -127,9 +127,10 @@ impl FeishuBot {
     pub fn parse_event(&self, event_json: &serde_json::Value) -> Option<RemoteCommand> {
         let event: MessageEvent = serde_json::from_value(event_json.clone()).ok()?;
 
+        // Prefer open_id because send_message uses receive_id_type=open_id.
         let user_id = event.sender
             .and_then(|s| s.sender_id)
-            .and_then(|ids| ids.user_id.or(ids.open_id))?;
+            .and_then(|ids| ids.open_id.or(ids.user_id))?;
 
         if !validate_remote_user(&user_id, &self.config.allowed_user_ids, &RemoteSource::Feishu) {
             tracing::warn!("Rejected Feishu message from unauthorized user: {}", user_id);

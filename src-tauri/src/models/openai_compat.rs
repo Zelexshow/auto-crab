@@ -30,10 +30,18 @@ pub struct OpenAICompatConfig {
 
 impl OpenAICompatProvider {
     pub fn new(config: OpenAICompatConfig) -> Self {
-        let client = Client::builder()
-            .timeout(std::time::Duration::from_secs(120))
-            .build()
-            .expect("failed to build HTTP client");
+        let mut builder = Client::builder()
+            .timeout(std::time::Duration::from_secs(120));
+
+        // Auto-detect system proxy (Clash etc.)
+        if let Ok(proxy_url) = std::env::var("HTTPS_PROXY").or_else(|_| std::env::var("HTTP_PROXY")) {
+            if let Ok(proxy) = reqwest::Proxy::all(&proxy_url) {
+                builder = builder.proxy(proxy);
+                tracing::debug!("Using proxy: {}", proxy_url);
+            }
+        }
+
+        let client = builder.build().expect("failed to build HTTP client");
         Self { client, config }
     }
 

@@ -37,6 +37,8 @@ rand = "0.8"
 base64 = "0.22"
 tokio-stream = "0.1"
 regex = "1"
+shellexpand = "3"
+url = "2"
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]

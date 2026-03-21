@@ -118,6 +118,31 @@ impl ToolRegistry {
         self.tools.values().collect()
     }
 
+    pub fn to_tool_definitions(&self) -> Vec<crate::models::provider::ToolDefinition> {
+        self.tools.values().map(|spec| {
+            let properties: serde_json::Map<String, serde_json::Value> = spec.parameters.iter().map(|p| {
+                (p.name.clone(), serde_json::json!({
+                    "type": p.param_type,
+                    "description": p.description,
+                }))
+            }).collect();
+            let required: Vec<&str> = spec.parameters.iter()
+                .filter(|p| p.required)
+                .map(|p| p.name.as_str())
+                .collect();
+
+            crate::models::provider::ToolDefinition {
+                name: spec.name.clone(),
+                description: spec.description.clone(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": properties,
+                    "required": required,
+                }),
+            }
+        }).collect()
+    }
+
     pub fn to_openai_tools(&self) -> Vec<serde_json::Value> {
         self.tools.values().map(|spec| {
             let properties: serde_json::Map<String, serde_json::Value> = spec.parameters.iter().map(|p| {
