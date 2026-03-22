@@ -69,10 +69,12 @@ export function TaskPanel() {
 
   if (steps.length === 0) {
     return (
-      <div className="h-full flex flex-col items-center justify-center gap-2 px-4">
-        <Activity size={32} style={{ color: "var(--text-muted)", opacity: 0.4 }} />
-        <p className="text-xs text-center" style={{ color: "var(--text-muted)" }}>
-          Agent 执行的思考过程和工具调用将在这里实时显示
+      <div className="h-full flex flex-col items-center justify-center gap-3 px-6">
+        <div className="w-12 h-12 rounded-full flex items-center justify-center" style={{ background: "var(--accent-light)" }}>
+          <Activity size={20} style={{ color: "var(--accent)", opacity: 0.6 }} />
+        </div>
+        <p className="text-xs text-center leading-5" style={{ color: "var(--text-muted)" }}>
+          Agent 思考过程<br/>和工具调用将在这里显示
         </p>
       </div>
     );
@@ -103,35 +105,38 @@ export function TaskPanel() {
         </button>
       </div>
 
-      <div className="flex-1 overflow-y-auto px-2 py-2 space-y-1">
+      <div className="flex-1 overflow-y-auto px-2.5 py-2 space-y-1.5">
         {steps.map((step) => {
           const isOpen = !collapsed.has(step.id);
+          const borderColor = step.status === "error" ? "var(--danger)"
+            : step.status === "blocked" ? "var(--warning)"
+            : step.status === "running" ? "var(--accent)"
+            : "var(--success)";
           return (
-            <div key={step.id}>
+            <div key={step.id} className="animate-fade-in">
               <button
                 onClick={() => toggleCollapse(step.id)}
-                className="flex items-center gap-1.5 w-full text-left px-2 py-1.5 rounded transition-colors"
-                style={{ background: "var(--bg-secondary)" }}
+                className="flex items-center gap-1.5 w-full text-left px-2.5 py-2 rounded-lg transition-all"
+                style={{ background: "var(--bg-primary)", borderLeft: `3px solid ${borderColor}`, boxShadow: "var(--shadow-sm)" }}
               >
                 {isOpen ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
                 {getIcon(step)}
-                <span className="text-[12px] truncate flex-1" style={{ color: "var(--text-primary)" }}>
-                  {step.type === "thinking" && "思考中..."}
-                  {step.type === "tool_call" && `调用 ${step.tool || "工具"}`}
-                  {step.type === "tool_result" && `${step.tool || "工具"} 返回结果`}
-                  {step.type === "response" && "生成回复"}
+                <span className="text-[12px] truncate flex-1 font-medium" style={{ color: "var(--text-primary)" }}>
+                  {step.type === "thinking" && (step.status === "running" ? "思考中..." : "思考完成")}
+                  {step.type === "tool_call" && `${step.tool || "工具"}`}
+                  {step.type === "tool_result" && `${step.tool || "工具"} ✓`}
+                  {step.type === "response" && "回复"}
                 </span>
-                <span className="text-[10px] shrink-0" style={{ color: "var(--text-muted)" }}>
+                <span className="text-[10px] shrink-0 tabular-nums" style={{ color: "var(--text-muted)" }}>
                   {new Date(step.timestamp).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
                 </span>
               </button>
               {isOpen && step.content && (
                 <pre
-                  className="text-[11px] leading-4 px-3 py-2 mx-2 mt-0.5 rounded overflow-x-auto whitespace-pre-wrap break-words"
+                  className="text-[11px] leading-relaxed px-3 py-2 ml-3 mt-1 rounded-lg overflow-x-auto whitespace-pre-wrap break-words"
                   style={{
-                    background: "var(--bg-primary)",
+                    background: "var(--bg-tertiary)",
                     color: "var(--text-secondary)",
-                    border: "1px solid var(--border)",
                     maxHeight: 200,
                   }}
                 >

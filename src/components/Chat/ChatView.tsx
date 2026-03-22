@@ -164,27 +164,27 @@ export function ChatView() {
 
       {/* Messages area */}
       <div
-        className="flex-1 overflow-y-auto px-4 py-4"
+        className="flex-1 overflow-y-auto px-6 py-6"
         style={{ background: "var(--bg-primary)" }}
       >
         {messages.length === 0 ? (
-          <div className="flex flex-col items-center justify-center h-full gap-3">
+          <div className="flex flex-col items-center justify-center h-full gap-4">
             <div
-              className="w-16 h-16 rounded-2xl flex items-center justify-center text-3xl"
-              style={{ background: "var(--accent)", color: "#fff" }}
+              className="w-20 h-20 rounded-2xl flex items-center justify-center text-4xl"
+              style={{ background: "linear-gradient(135deg, var(--accent), var(--accent-hover))", color: "#fff", boxShadow: "var(--shadow-md)" }}
             >
               🦀
             </div>
-            <h2 className="text-base font-semibold mt-1">你好，我是小蟹</h2>
-            <p style={{ color: "var(--text-muted)" }} className="text-xs text-center max-w-sm">
-              你的安全桌面 AI 助理。所有操作经过风险评估，危险操作需要你的确认。
+            <h2 className="text-lg font-bold mt-1">你好，我是小蟹</h2>
+            <p style={{ color: "var(--text-muted)" }} className="text-sm text-center max-w-md leading-relaxed">
+              你的安全桌面 AI 助理。可以操作文件、执行命令、截图分析、远程控制。
             </p>
-            <div className="flex gap-2 mt-3 flex-wrap justify-center">
-              {["帮我整理今日任务", "分析代码结构", "写个 Python 脚本"].map((s) => (
+            <div className="flex gap-2.5 mt-4 flex-wrap justify-center">
+              {["帮我整理桌面文件", "看看屏幕上有什么", "写个 Python 脚本"].map((s) => (
                 <button
                   key={s}
                   onClick={() => { setInput(s); textareaRef.current?.focus(); }}
-                  className="px-3 py-1.5 rounded-md text-xs transition-colors border"
+                  className="px-4 py-2 rounded-xl text-[13px] transition-all border"
                   style={{
                     background: "var(--bg-secondary)",
                     borderColor: "var(--border)",
@@ -197,7 +197,7 @@ export function ChatView() {
             </div>
           </div>
         ) : (
-          <div className="max-w-2xl mx-auto space-y-3">
+          <div className="max-w-3xl mx-auto space-y-4">
             {messages.map((msg) => (
               <ChatMessage key={msg.id} message={msg} />
             ))}
@@ -206,48 +206,79 @@ export function ChatView() {
         )}
       </div>
 
-      {/* Input area - WeChat style */}
+      {/* Input area — DeepSeek style */}
       <div
-        className="border-t px-4 py-2.5 shrink-0"
-        style={{ borderColor: "var(--border)", background: "var(--bg-secondary)" }}
+        style={{
+          padding: "16px 24px 20px",
+          background: "var(--bg-primary)",
+          flexShrink: 0,
+        }}
       >
-        <div className="max-w-2xl mx-auto flex items-end gap-2">
+        <div
+          style={{
+            maxWidth: 768,
+            margin: "0 auto",
+            background: "var(--bg-secondary)",
+            border: "1px solid var(--border)",
+            borderRadius: 16,
+            padding: "4px 4px 4px 0",
+            boxShadow: "var(--shadow-md)",
+            display: "flex",
+            alignItems: "flex-end",
+          }}
+        >
           <textarea
             ref={textareaRef}
             value={input}
             onChange={(e) => { setInput(e.target.value); adjustTextarea(); }}
             onKeyDown={handleKeyDown}
-            placeholder="输入消息..."
+            placeholder="给 Auto Crab 发送消息..."
             rows={1}
-            className="flex-1 rounded-md px-3 py-2 text-sm leading-6 outline-none resize-none"
             style={{
-              background: "var(--bg-primary)",
+              flex: 1,
+              background: "transparent",
               color: "var(--text-primary)",
-              border: "1px solid var(--border)",
+              border: "none",
+              outline: "none",
+              resize: "none",
+              padding: "14px 18px",
+              fontSize: 14,
+              lineHeight: 1.6,
               maxHeight: 150,
             }}
           />
           <button
             onClick={handleSend}
-            disabled={!input.trim()}
-            className="shrink-0 rounded-md text-xs font-medium transition-colors disabled:opacity-40"
+            disabled={!input.trim() && !isLoading}
             style={{
-              background: "#07c160",
-              color: "#fff",
-              width: 64,
-              height: 38,
+              flexShrink: 0,
+              width: 40,
+              height: 40,
+              borderRadius: 12,
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
+              background: input.trim() ? "var(--accent)" : "var(--bg-tertiary)",
+              color: input.trim() ? "#fff" : "var(--text-muted)",
+              marginRight: 4,
+              marginBottom: 4,
+              transition: "all 0.15s ease",
+              cursor: input.trim() ? "pointer" : "default",
+              border: "none",
             }}
           >
             {isLoading ? (
-              <Loader2 size={14} className="animate-spin" style={{ color: "#fff" }} />
+              <Loader2 size={18} className="animate-spin" />
             ) : (
-              "发送"
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M22 2 11 13" /><path d="M22 2 15 22 11 13 2 9 22 2" />
+              </svg>
             )}
           </button>
         </div>
+        <p style={{ textAlign: "center", fontSize: 11, color: "var(--text-muted)", marginTop: 8 }}>
+          Auto Crab 可执行文件操作和命令，危险操作需要确认
+        </p>
       </div>
     </div>
   );

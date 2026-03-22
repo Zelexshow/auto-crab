@@ -37,6 +37,10 @@ function App() {
         </div>
         {currentView === "chat" && (
           <div className="w-72 border-l shrink-0 overflow-y-auto" style={{ borderColor: "var(--border)", background: "var(--bg-secondary)" }}>
+            <div className="px-3 py-2.5 border-b flex items-center gap-2" style={{ borderColor: "var(--border)" }}>
+              <div className="w-2 h-2 rounded-full animate-pulse-dot" style={{ background: "var(--accent)" }} />
+              <span className="text-xs font-semibold tracking-wide" style={{ color: "var(--text-secondary)" }}>工具执行面板</span>
+            </div>
             <TaskPanel />
           </div>
         )}

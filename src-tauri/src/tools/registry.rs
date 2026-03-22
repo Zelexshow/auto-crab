@@ -167,7 +167,7 @@ impl ToolRegistry {
 
         self.register(ToolSpec {
             name: "analyze_screen".into(),
-            description: "Take a screenshot of the current screen and analyze its content using AI vision. Use this when the user asks you to look at the screen, read what's on the monitor, check an application window, or describe what they see. Returns a detailed text description of what's visible.".into(),
+            description: "Take a screenshot and analyze it with AI vision. Returns text description AND pixel coordinates of UI elements. Use this BEFORE mouse_click to find where to click. The coordinates returned can be directly used with mouse_click(x, y).".into(),
             operation_type: "read_file".into(),
             parameters: vec![ToolParam {
                 name: "question".into(),

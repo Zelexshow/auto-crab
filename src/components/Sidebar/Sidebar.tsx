@@ -57,37 +57,40 @@ export function Sidebar() {
     >
       {/* Logo */}
       <div
-        className="flex items-center gap-2 px-3 h-12 border-b shrink-0"
+        className="flex items-center gap-3 px-4 h-14 border-b shrink-0"
         style={{ borderColor: "var(--border)" }}
       >
         <div
-          className="w-7 h-7 rounded-md flex items-center justify-center text-white font-bold text-xs shrink-0"
-          style={{ background: "var(--accent)" }}
+          className="w-9 h-9 rounded-xl flex items-center justify-center text-lg shrink-0"
+          style={{ background: "linear-gradient(135deg, var(--accent), var(--accent-hover))", boxShadow: "var(--shadow-sm)" }}
         >
           🦀
         </div>
         {sidebarOpen && (
-          <span className="font-semibold text-sm whitespace-nowrap">Auto Crab</span>
+          <div className="flex flex-col">
+            <span className="font-bold text-[15px] tracking-tight">Auto Crab</span>
+            <span className="text-[11px]" style={{ color: "var(--text-muted)" }}>AI 桌面助理</span>
+          </div>
         )}
       </div>
 
       {/* New chat */}
-      <div className="px-2 pt-3 pb-1">
+      <div className="px-3 pt-4 pb-2">
         <button
           onClick={() => {
             newConversation();
             setView("chat");
           }}
-          className="flex items-center gap-2 w-full rounded-md px-3 py-1.5 text-xs font-medium transition-colors"
-          style={{ background: "#07c160", color: "#fff" }}
+          className="flex items-center justify-center gap-2 w-full rounded-xl px-4 py-2.5 text-[13px] font-medium"
+          style={{ background: "var(--accent)", color: "#fff", boxShadow: "var(--shadow-md)" }}
         >
-          <Plus size={14} />
+          <Plus size={16} strokeWidth={2.5} />
           {sidebarOpen && "新对话"}
         </button>
       </div>
 
       {/* Nav */}
-      <nav className="px-2 py-1 space-y-0.5">
+      <nav className="px-3 py-2 space-y-1">
         {navItems.map((item) => {
           const Icon = item.icon;
           const active = currentView === item.id;
@@ -95,13 +98,13 @@ export function Sidebar() {
             <button
               key={item.id}
               onClick={() => setView(item.id)}
-              className="flex items-center gap-2 w-full rounded-md px-3 py-1.5 text-xs transition-colors"
+              className="flex items-center gap-3 w-full rounded-xl px-3.5 py-2.5 text-[13px] font-medium transition-all"
               style={{
-                background: active ? "var(--bg-tertiary)" : "transparent",
-                color: active ? "var(--text-primary)" : "var(--text-secondary)",
+                background: active ? "var(--accent-light)" : "transparent",
+                color: active ? "var(--accent)" : "var(--text-secondary)",
               }}
             >
-              <Icon size={15} />
+              <Icon size={18} strokeWidth={active ? 2.2 : 1.6} />
               {sidebarOpen && item.label}
             </button>
           );
@@ -110,11 +113,11 @@ export function Sidebar() {
 
       {/* Conversation history */}
       {sidebarOpen && conversations.length > 0 && (
-        <div className="flex-1 overflow-y-auto px-2 pt-2 border-t mt-1" style={{ borderColor: "var(--border)" }}>
-          <p className="text-[10px] font-medium px-3 py-1 uppercase tracking-wider" style={{ color: "var(--text-muted)" }}>
+        <div className="flex-1 overflow-y-auto px-3 pt-3 border-t mt-2" style={{ borderColor: "var(--border)" }}>
+          <p className="text-[11px] font-semibold px-1 pb-2 uppercase tracking-widest" style={{ color: "var(--text-muted)" }}>
             历史对话
           </p>
-          <div className="space-y-0.5">
+          <div className="space-y-1">
             {conversations.slice(0, 30).map((conv) => {
               const active = conv.id === conversationId;
               const isEditing = editingId === conv.id;
@@ -122,13 +125,13 @@ export function Sidebar() {
               return (
                 <div
                   key={conv.id}
-                  className="group flex items-center rounded-md transition-colors"
+                  className="group flex items-center rounded-xl transition-all"
                   style={{
                     background: active ? "var(--bg-tertiary)" : "transparent",
                   }}
                 >
                   {isEditing ? (
-                    <div className="flex items-center gap-1 flex-1 px-2 py-1">
+                    <div className="flex items-center gap-1.5 flex-1 px-3 py-2">
                       <input
                         type="text"
                         value={editTitle}
@@ -137,7 +140,7 @@ export function Sidebar() {
                           if (e.key === "Enter") confirmRename();
                           if (e.key === "Escape") cancelRename();
                         }}
-                        className="flex-1 text-xs rounded px-1.5 py-0.5 outline-none min-w-0"
+                        className="flex-1 text-[13px] rounded-lg px-2.5 py-1 outline-none min-w-0"
                         style={{
                           background: "var(--bg-primary)",
                           border: "1px solid var(--accent)",
@@ -145,11 +148,11 @@ export function Sidebar() {
                         }}
                         autoFocus
                       />
-                      <button onClick={confirmRename} className="p-0.5" style={{ color: "var(--success)" }}>
-                        <Check size={12} />
+                      <button onClick={confirmRename} className="p-1" style={{ color: "var(--success)" }}>
+                        <Check size={14} />
                       </button>
-                      <button onClick={cancelRename} className="p-0.5" style={{ color: "var(--text-muted)" }}>
-                        <X size={12} />
+                      <button onClick={cancelRename} className="p-1" style={{ color: "var(--text-muted)" }}>
+                        <X size={14} />
                       </button>
                     </div>
                   ) : (
@@ -159,40 +162,40 @@ export function Sidebar() {
                           loadConversation(conv.id);
                           setView("chat");
                         }}
-                        className="flex-1 text-left px-3 py-1.5 min-w-0"
+                        className="flex-1 text-left px-3.5 py-2.5 min-w-0"
                       >
                         <p
-                          className="text-xs truncate"
+                          className="text-[13px] truncate leading-snug"
                           style={{ color: active ? "var(--text-primary)" : "var(--text-secondary)" }}
                         >
                           {conv.title}
                         </p>
-                        <p className="text-[10px]" style={{ color: "var(--text-muted)" }}>
+                        <p className="text-[11px] mt-0.5" style={{ color: "var(--text-muted)" }}>
                           {conv.message_count} 条消息
                         </p>
                       </button>
-                      <div className="shrink-0 flex items-center gap-0.5 mr-1 opacity-0 group-hover:opacity-60 transition-opacity">
+                      <div className="shrink-0 flex items-center gap-1 mr-2 opacity-0 group-hover:opacity-70 transition-opacity">
                         <button
                           onClick={(e) => {
                             e.stopPropagation();
                             startRename(conv.id, conv.title);
                           }}
-                          className="p-1 rounded hover:opacity-100"
+                          className="p-1.5 rounded-lg hover:opacity-100"
                           style={{ color: "var(--text-muted)" }}
                           title="重命名"
                         >
-                          <Pencil size={11} />
+                          <Pencil size={13} />
                         </button>
                         <button
                           onClick={(e) => {
                             e.stopPropagation();
                             deleteConversation(conv.id);
                           }}
-                          className="p-1 rounded hover:opacity-100"
+                          className="p-1.5 rounded-lg hover:opacity-100"
                           style={{ color: "var(--text-muted)" }}
                           title="删除"
                         >
-                          <Trash2 size={11} />
+                          <Trash2 size={13} />
                         </button>
                       </div>
                     </>

@@ -67,36 +67,56 @@ export function ChatMessage({ message }: ChatMessageProps) {
   };
 
   return (
-    <div className={clsx("flex gap-2.5 group", isUser ? "flex-row-reverse" : "flex-row")}>
+    <div
+      className={clsx("flex group", isUser ? "flex-row-reverse" : "flex-row")}
+      style={{ gap: 14, marginBottom: 6 }}
+    >
       {/* Avatar */}
       <div
-        className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0 text-xs font-bold select-none shadow-sm"
         style={{
+          width: 42,
+          height: 42,
+          borderRadius: 12,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          flexShrink: 0,
+          fontSize: 15,
+          fontWeight: 700,
+          color: "#fff",
+          marginTop: 2,
           background: isUser
             ? "linear-gradient(135deg, #43e97b 0%, #38f9d7 100%)"
-            : "linear-gradient(135deg, #667eea 0%, #764ba2 100%)",
-          color: "#fff",
+            : "linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%)",
+          boxShadow: "var(--shadow-sm)",
+          userSelect: "none",
         }}
       >
         {isUser ? "我" : "蟹"}
       </div>
 
       {/* Content */}
-      <div className={clsx("max-w-[75%] min-w-0", isUser ? "items-end" : "items-start")}>
+      <div style={{ maxWidth: "72%", minWidth: 0 }}>
         <div
-          className={clsx("relative rounded-xl px-3.5 py-2.5 text-[13px] leading-[1.7] break-words shadow-sm")}
           style={{
+            position: "relative",
+            borderRadius: 18,
+            padding: "12px 18px",
+            fontSize: 14,
+            lineHeight: 1.8,
+            wordBreak: "break-word",
             background: isUser ? "#95ec69" : "var(--assistant-bubble)",
             color: isUser ? "#1a1a1a" : "var(--text-primary)",
+            boxShadow: "var(--shadow-sm)",
           }}
         >
           {/* Notch */}
           <svg
-            className={clsx("absolute top-3", isUser ? "-right-[5px]" : "-left-[5px]")}
-            width="6" height="10" viewBox="0 0 6 10"
+            style={{ position: "absolute", top: 16, ...(isUser ? { right: -6 } : { left: -6 }) }}
+            width="7" height="12" viewBox="0 0 7 12"
           >
             <path
-              d={isUser ? "M0 0 Q6 5 0 10 Z" : "M6 0 Q0 5 6 10 Z"}
+              d={isUser ? "M0 0 Q7 6 0 12 Z" : "M7 0 Q0 6 7 12 Z"}
               fill={isUser ? "#95ec69" : "var(--assistant-bubble)"}
             />
           </svg>

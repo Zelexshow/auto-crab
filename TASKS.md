@@ -141,6 +141,7 @@
 
 ## 卡点记录
 
+- ⚠️ 屏幕操控窗口焦点问题: 操作时目标窗口可能失去焦点（飞书通知抢焦点），需要在 mouse_click 前用 Windows API（SetForegroundWindow）强制聚焦目标窗口，操作后截图验证结果，失败自动重试。
 - ⚠️ T-039 WASM 沙箱: 架构和权限系统已完成，但 wasmtime 运行时未集成（需要在 Cargo.toml 添加 `wasmtime` 依赖并实现 call() 方法）。当前 `sandbox.call()` 返回占位错误。添加 wasmtime 后需约 2-3 小时接入。
 - ⚠️ T-040 浏览器自动化: 基于 headless Chrome `--dump-dom` 和 `--screenshot`，依赖系统已安装 Chrome/Edge。更高级的交互式操作（点击、填表）需要引入 `chromiumoxide` 或 `playwright` crate。
 

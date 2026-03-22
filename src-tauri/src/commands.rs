@@ -189,7 +189,7 @@ fn is_readonly_shell_command(arguments: &str) -> bool {
     matches!(first,
         "dir" | "ls" | "cat" | "type" | "where" | "which" | "whoami" |
         "echo" | "date" | "time" | "hostname" | "pwd" | "head" | "tail" |
-        "find" | "wc" | "sort" | "grep" | "rg" | "tree"
+        "find" | "wc" | "sort" | "grep" | "rg" | "tree" | "tasklist"
     )
 }
 
@@ -310,22 +310,34 @@ pub async fn dispatch_tool(tc: &ToolCall, file_ops: &FileOps, shell: &ShellExecu
             let x = args["x"].as_i64().unwrap_or(0) as i32;
             let y = args["y"].as_i64().unwrap_or(0) as i32;
             let click_type = args["click_type"].as_str().unwrap_or("left");
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
             match do_mouse_click(x, y, click_type).await {
-                Ok(msg) => msg,
+                Ok(msg) => {
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    msg
+                }
                 Err(e) => format!("mouse_click 失败: {}", e),
             }
         }
         "keyboard_type" => {
             let text = args["text"].as_str().unwrap_or("");
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
             match do_keyboard_type(text).await {
-                Ok(msg) => msg,
+                Ok(msg) => {
+                    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                    msg
+                }
                 Err(e) => format!("keyboard_type 失败: {}", e),
             }
         }
         "key_press" => {
             let key = args["key"].as_str().unwrap_or("enter");
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
             match do_key_press(key).await {
-                Ok(msg) => msg,
+                Ok(msg) => {
+                    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                    msg
+                }
                 Err(e) => format!("key_press 失败: {}", e),
             }
         }
@@ -366,11 +378,17 @@ pub async fn dispatch_tool(tc: &ToolCall, file_ops: &FileOps, shell: &ShellExecu
                 .or_else(|_| std::env::var("HOME"))
                 .unwrap_or_else(|_| ".".into());
             let tmp_path = format!("{}\\AppData\\Local\\Temp\\auto-crab-screen.png", data_dir);
+            let question = args["question"].as_str().unwrap_or("请详细描述截图中的内容");
             match take_screenshot(&tmp_path).await {
                 Ok(path) => {
-                    let prompt = args["question"]
-                        .as_str()
-                        .unwrap_or("请详细描述截图中的内容");
+                    let screen_w = 2560;
+                    let screen_h = 1440;
+                    let prompt = format!(
+                        "{}\n\n屏幕实际分辨率: {}x{}。截图已按比例缩小，请根据原始分辨率换算坐标。\
+如果你看到需要点击的UI元素，请输出其在 {}x{} 屏幕上的坐标，格式: CLICK_TARGET: (x, y) 元素名称。\
+不要编造坐标，如果看不清具体位置就说明无法确定。",
+                        question, screen_w, screen_h, screen_w, screen_h
+                    );
                     format!("__ANALYZE_SCREEN__:{}::{}", path, prompt)
                 }
                 Err(e) => format!("截图失败: {}", e),
@@ -463,27 +481,41 @@ pub async fn analyze_screenshot_with_prompt(
         .timeout(std::time::Duration::from_secs(60))
         .build()?;
 
-    let resp = client
-        .post("https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions")
-        .header("Authorization", format!("Bearer {}", api_key))
-        .header("Content-Type", "application/json")
-        .json(&body)
-        .send()
-        .await?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let err_body = resp.text().await.unwrap_or_default();
-        anyhow::bail!("VL API error {}: {}", status, err_body);
+    let mut last_err = String::new();
+    for attempt in 0..3 {
+        if attempt > 0 {
+            tracing::info!("VL API retry attempt {}", attempt + 1);
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
+        match client
+            .post("https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions")
+            .header("Authorization", format!("Bearer {}", api_key))
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await
+        {
+            Ok(resp) => {
+                if !resp.status().is_success() {
+                    let status = resp.status();
+                    let err_body = resp.text().await.unwrap_or_default();
+                    last_err = format!("VL API error {}: {}", status, err_body);
+                    continue;
+                }
+                let api_resp: serde_json::Value = resp.json().await?;
+                let content = api_resp["choices"][0]["message"]["content"]
+                    .as_str()
+                    .unwrap_or("视觉模型未返回内容")
+                    .to_string();
+                return Ok(content);
+            }
+            Err(e) => {
+                last_err = format!("网络错误: {}", e);
+                continue;
+            }
+        }
     }
-
-    let api_resp: serde_json::Value = resp.json().await?;
-    let content = api_resp["choices"][0]["message"]["content"]
-        .as_str()
-        .unwrap_or("视觉模型未返回内容")
-        .to_string();
-
-    Ok(content)
+    anyhow::bail!("VL 分析失败（重试3次）: {}", last_err)
 }
 
 async fn do_mouse_click(x: i32, y: i32, click_type: &str) -> anyhow::Result<String> {

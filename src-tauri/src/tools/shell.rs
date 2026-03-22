@@ -43,6 +43,9 @@ impl ShellExecutor {
     pub async fn execute(&self, command: &str, working_dir: Option<&str>) -> Result<ShellOutput> {
         self.validate_command(command)?;
 
+        let cmd_lower = command.trim().to_lowercase();
+        let is_launch = cmd_lower.starts_with("start ") || cmd_lower.contains("start /");
+
         let (shell, flag) = if cfg!(target_os = "windows") {
             ("cmd", "/C")
         } else {
@@ -58,9 +61,16 @@ impl ShellExecutor {
 
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
-        let output = tokio::time::timeout(std::time::Duration::from_secs(60), cmd.output())
+        let timeout_secs = if is_launch { 5 } else { 60 };
+        let output = tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), cmd.output())
             .await
-            .map_err(|_| anyhow::anyhow!("Command timed out after 60 seconds"))??;
+            .map_err(|_| {
+                if is_launch {
+                    anyhow::anyhow!("应用已启动（后台运行中）")
+                } else {
+                    anyhow::anyhow!("Command timed out after {} seconds", timeout_secs)
+                }
+            })??;
 
         Ok(ShellOutput {
             stdout: String::from_utf8_lossy(&output.stdout).to_string(),
