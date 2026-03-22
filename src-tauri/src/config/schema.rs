@@ -57,6 +57,7 @@ pub struct ModelsConfig {
     pub primary: Option<ModelEntry>,
     pub fallback: Option<ModelEntry>,
     pub coding: Option<ModelEntry>,
+    pub vision: Option<ModelEntry>,
     #[serde(default)]
     pub routing: HashMap<String, String>,
 }
@@ -145,12 +146,26 @@ impl Default for ToolsConfig {
             file_access: vec![],
             shell_enabled: true,
             shell_allowed_commands: vec![
-                "git".into(), "npm".into(), "pnpm".into(),
-                "python".into(), "cargo".into(), "node".into(),
-                "cmd".into(), "powershell".into(), "pwsh".into(),
-                "echo".into(), "dir".into(), "ls".into(), "cat".into(),
-                "mkdir".into(), "cp".into(), "mv".into(), "rm".into(),
-                "type".into(), "where".into(), "whoami".into(),
+                "git".into(),
+                "npm".into(),
+                "pnpm".into(),
+                "python".into(),
+                "cargo".into(),
+                "node".into(),
+                "cmd".into(),
+                "powershell".into(),
+                "pwsh".into(),
+                "echo".into(),
+                "dir".into(),
+                "ls".into(),
+                "cat".into(),
+                "mkdir".into(),
+                "cp".into(),
+                "mv".into(),
+                "rm".into(),
+                "type".into(),
+                "where".into(),
+                "whoami".into(),
             ],
             network_access: true,
             network_allowed_domains: vec![],
@@ -216,11 +231,21 @@ pub struct ScheduledJob {
     pub auto_execute: bool,
 }
 
-fn default_language() -> String { "zh-CN".into() }
-fn default_theme() -> String { "system".into() }
-fn default_agent_name() -> String { "小蟹".into() }
-fn default_personality() -> String { "professional".into() }
-fn default_max_context() -> usize { 128000 }
+fn default_language() -> String {
+    "zh-CN".into()
+}
+fn default_theme() -> String {
+    "system".into()
+}
+fn default_agent_name() -> String {
+    "小蟹".into()
+}
+fn default_personality() -> String {
+    "professional".into()
+}
+fn default_max_context() -> usize {
+    128000
+}
 fn default_system_prompt() -> String {
     let os_info = if cfg!(target_os = "windows") {
         "当前操作系统是 Windows。桌面路径示例：C:\\Users\\用户名\\Desktop。\
@@ -240,6 +265,12 @@ Shell 命令使用 cmd /C 执行。"
         os_info
     )
 }
-fn default_true() -> bool { true }
-fn default_lock_minutes() -> u32 { 15 }
-fn default_poll_interval() -> u64 { 30 }
+fn default_true() -> bool {
+    true
+}
+fn default_lock_minutes() -> u32 {
+    15
+}
+fn default_poll_interval() -> u64 {
+    30
+}

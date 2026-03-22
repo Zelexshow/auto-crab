@@ -12,7 +12,8 @@ impl FileOps {
     }
 
     fn check_access(&self, path: &Path) -> Result<PathBuf> {
-        let canonical = path.canonicalize()
+        let canonical = path
+            .canonicalize()
             .or_else(|_| Ok::<PathBuf, std::io::Error>(path.to_path_buf()))?;
 
         if self.allowed_roots.is_empty() {
@@ -33,7 +34,7 @@ impl FileOps {
         );
     }
 
-    fn expand_path(path: &str) -> PathBuf {
+    pub fn expand_path(path: &str) -> PathBuf {
         let expanded = shellexpand::tilde(path).to_string();
         PathBuf::from(expanded)
     }
@@ -68,9 +69,7 @@ impl FileOps {
             });
         }
 
-        entries.sort_by(|a, b| {
-            b.is_dir.cmp(&a.is_dir).then(a.name.cmp(&b.name))
-        });
+        entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then(a.name.cmp(&b.name)));
 
         Ok(entries)
     }

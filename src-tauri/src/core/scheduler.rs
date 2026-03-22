@@ -23,8 +23,15 @@ pub struct TaskScheduler {
 
 #[derive(Debug, Clone)]
 pub enum SchedulerEvent {
-    TaskReady { name: String, action: String, auto_execute: bool },
-    TaskCompleted { name: String, success: bool },
+    TaskReady {
+        name: String,
+        action: String,
+        auto_execute: bool,
+    },
+    TaskCompleted {
+        name: String,
+        success: bool,
+    },
 }
 
 impl TaskScheduler {
@@ -76,16 +83,20 @@ impl TaskScheduler {
     }
 
     pub fn list_status(&self) -> Vec<ScheduledTaskStatus> {
-        self.jobs.iter().map(|job| {
-            ScheduledTaskStatus {
+        self.jobs
+            .iter()
+            .map(|job| ScheduledTaskStatus {
                 name: job.name.clone(),
                 cron: job.cron.clone(),
-                last_run: self.last_runs.get(&job.name).map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string()),
+                last_run: self
+                    .last_runs
+                    .get(&job.name)
+                    .map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string()),
                 next_run: None,
                 enabled: true,
                 auto_execute: job.auto_execute,
-            }
-        }).collect()
+            })
+            .collect()
     }
 }
 

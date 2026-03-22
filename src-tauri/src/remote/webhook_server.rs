@@ -21,11 +21,11 @@ pub struct WebhookCommand {
 }
 
 impl WebhookServer {
-    pub fn new(
-        config: &AppConfig,
-        command_tx: mpsc::Sender<WebhookCommand>,
-    ) -> Self {
-        let feishu = config.remote.feishu.as_ref()
+    pub fn new(config: &AppConfig, command_tx: mpsc::Sender<WebhookCommand>) -> Self {
+        let feishu = config
+            .remote
+            .feishu
+            .as_ref()
             .map(|c| Arc::new(Mutex::new(FeishuBot::new(c.clone()))));
 
         Self {
@@ -38,8 +38,8 @@ impl WebhookServer {
     /// Start the webhook HTTP server.
     /// This spawns a background task that listens for incoming webhooks.
     pub async fn start(&self) -> anyhow::Result<()> {
-        use tokio::net::TcpListener;
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
 
         let addr = format!("127.0.0.1:{}", self.port);
         let listener = TcpListener::bind(&addr).await?;
@@ -104,19 +104,21 @@ async fn handle_request(
         if let Some(ref feishu_bot) = feishu {
             let bot = feishu_bot.lock().await;
             if let Some(cmd) = bot.parse_event(event) {
-                let _ = tx.send(WebhookCommand {
-                    source: "feishu".into(),
-                    user_id: cmd.user_id,
-                    command_type: match cmd.command_type {
-                        CommandType::Chat => "chat".into(),
-                        CommandType::StatusQuery => "status".into(),
-                        CommandType::TaskCreate => "task_create".into(),
-                        CommandType::TaskCancel => "task_cancel".into(),
-                        CommandType::ApproveAction => "approve".into(),
-                        CommandType::RejectAction => "reject".into(),
-                    },
-                    text: cmd.content,
-                }).await;
+                let _ = tx
+                    .send(WebhookCommand {
+                        source: "feishu".into(),
+                        user_id: cmd.user_id,
+                        command_type: match cmd.command_type {
+                            CommandType::Chat => "chat".into(),
+                            CommandType::StatusQuery => "status".into(),
+                            CommandType::TaskCreate => "task_create".into(),
+                            CommandType::TaskCancel => "task_cancel".into(),
+                            CommandType::ApproveAction => "approve".into(),
+                            CommandType::RejectAction => "reject".into(),
+                        },
+                        text: cmd.content,
+                    })
+                    .await;
                 tracing::info!("Feishu command received: {:?}", cmd.command_type);
             }
         }

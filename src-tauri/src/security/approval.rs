@@ -52,7 +52,10 @@ impl ApprovalGate {
         match risk {
             RiskLevel::Safe => Ok(ApprovalResult::AutoApproved),
             RiskLevel::Forbidden => {
-                anyhow::bail!("Operation '{}' is forbidden and cannot be executed", operation);
+                anyhow::bail!(
+                    "Operation '{}' is forbidden and cannot be executed",
+                    operation
+                );
             }
             RiskLevel::Moderate | RiskLevel::Dangerous => {
                 let (tx, rx) = oneshot::channel();
@@ -71,7 +74,10 @@ impl ApprovalGate {
                     pending.insert(id.clone(), (approval.clone(), tx));
                 }
 
-                Ok(ApprovalResult::Pending { approval, receiver: rx })
+                Ok(ApprovalResult::Pending {
+                    approval,
+                    receiver: rx,
+                })
             }
         }
     }

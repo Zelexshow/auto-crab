@@ -73,7 +73,8 @@ impl FeishuBot {
 
         let secret = CredentialStore::resolve_ref(&self.config.app_secret_ref)?;
 
-        let resp: TokenResponse = self.client
+        let resp: TokenResponse = self
+            .client
             .post("https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal")
             .json(&TokenRequest {
                 app_id: self.config.app_id.clone(),
@@ -88,14 +89,14 @@ impl FeishuBot {
             anyhow::bail!("Feishu token error: {}", resp.msg);
         }
 
-        let token = resp.tenant_access_token
+        let token = resp
+            .tenant_access_token
             .ok_or_else(|| anyhow::anyhow!("no token in response"))?;
         let expires_in = resp.expire.unwrap_or(7200);
 
         self.access_token = Some(token.clone());
-        self.token_expires_at = Some(
-            chrono::Utc::now() + chrono::Duration::seconds(expires_in - 300)
-        );
+        self.token_expires_at =
+            Some(chrono::Utc::now() + chrono::Duration::seconds(expires_in - 300));
 
         Ok(token)
     }
@@ -109,7 +110,8 @@ impl FeishuBot {
             "content": serde_json::json!({"text": text}).to_string(),
         });
 
-        let resp = self.client
+        let resp = self
+            .client
             .post("https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=open_id")
             .header("Authorization", format!("Bearer {}", token))
             .json(&body)
@@ -128,18 +130,24 @@ impl FeishuBot {
         let event: MessageEvent = serde_json::from_value(event_json.clone()).ok()?;
 
         // Prefer open_id because send_message uses receive_id_type=open_id.
-        let user_id = event.sender
+        let user_id = event
+            .sender
             .and_then(|s| s.sender_id)
             .and_then(|ids| ids.open_id.or(ids.user_id))?;
 
-        if !validate_remote_user(&user_id, &self.config.allowed_user_ids, &RemoteSource::Feishu) {
-            tracing::warn!("Rejected Feishu message from unauthorized user: {}", user_id);
+        if !validate_remote_user(
+            &user_id,
+            &self.config.allowed_user_ids,
+            &RemoteSource::Feishu,
+        ) {
+            tracing::warn!(
+                "Rejected Feishu message from unauthorized user: {}",
+                user_id
+            );
             return None;
         }
 
-        let content = event.message
-            .and_then(|m| m.content)
-            .unwrap_or_default();
+        let content = event.message.and_then(|m| m.content).unwrap_or_default();
 
         let text: String = serde_json::from_str::<serde_json::Value>(&content)
             .ok()

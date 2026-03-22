@@ -15,8 +15,16 @@ pub struct RemoteApprovalBridge {
 
 impl RemoteApprovalBridge {
     pub fn from_config(config: &AppConfig) -> Self {
-        let feishu = config.remote.feishu.as_ref().map(|c| FeishuBot::new(c.clone()));
-        let wechat = config.remote.wechat_work.as_ref().map(|c| WechatWorkBot::new(c.clone()));
+        let feishu = config
+            .remote
+            .feishu
+            .as_ref()
+            .map(|c| FeishuBot::new(c.clone()));
+        let wechat = config
+            .remote
+            .wechat_work
+            .as_ref()
+            .map(|c| WechatWorkBot::new(c.clone()));
         Self { feishu, wechat }
     }
 
@@ -61,7 +69,10 @@ impl RemoteApprovalBridge {
     pub async fn notify_result(&mut self, approval_id: &str, approved: bool, operation: &str) {
         let emoji = if approved { "✅" } else { "❌" };
         let status = if approved { "已批准" } else { "已拒绝" };
-        let msg = format!("{} 操作{}: {}\nID: {}", emoji, status, operation, approval_id);
+        let msg = format!(
+            "{} 操作{}: {}\nID: {}",
+            emoji, status, operation, approval_id
+        );
 
         if let Some(ref mut feishu) = self.feishu {
             let _ = feishu.send_message("", &msg).await;
@@ -88,11 +99,6 @@ fn format_approval_message(approval: &PendingApproval) -> String {
          ID: {}\n\n\
          回复 /approve {} 批准\n\
          回复 /reject {} 拒绝",
-        approval.operation,
-        risk,
-        approval.description,
-        approval.id,
-        approval.id,
-        approval.id,
+        approval.operation, risk, approval.description, approval.id, approval.id, approval.id,
     )
 }

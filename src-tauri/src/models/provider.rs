@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use tokio_stream::Stream;
 use std::pin::Pin;
+use tokio_stream::Stream;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
@@ -49,7 +49,9 @@ pub struct ChatRequest {
     pub max_tokens: Option<u32>,
 }
 
-fn default_temperature() -> f32 { 0.7 }
+fn default_temperature() -> f32 {
+    0.7
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatResponse {

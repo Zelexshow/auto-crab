@@ -30,11 +30,11 @@ pub struct OpenAICompatConfig {
 
 impl OpenAICompatProvider {
     pub fn new(config: OpenAICompatConfig) -> Self {
-        let mut builder = Client::builder()
-            .timeout(std::time::Duration::from_secs(120));
+        let mut builder = Client::builder().timeout(std::time::Duration::from_secs(120));
 
         // Auto-detect system proxy (Clash etc.)
-        if let Ok(proxy_url) = std::env::var("HTTPS_PROXY").or_else(|_| std::env::var("HTTP_PROXY")) {
+        if let Ok(proxy_url) = std::env::var("HTTPS_PROXY").or_else(|_| std::env::var("HTTP_PROXY"))
+        {
             if let Ok(proxy) = reqwest::Proxy::all(&proxy_url) {
                 builder = builder.proxy(proxy);
                 tracing::debug!("Using proxy: {}", proxy_url);
@@ -77,6 +77,18 @@ impl OpenAICompatProvider {
             api_key: api_key.into(),
             model: model.into(),
             max_context: 128000,
+            supports_tools: true,
+        })
+    }
+
+    pub fn dashscope_vl(api_key: &str, model: &str) -> Self {
+        Self::new(OpenAICompatConfig {
+            provider_name: "dashscope_vl".into(),
+            display_name: "通义千问 VL (视觉)".into(),
+            base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1".into(),
+            api_key: api_key.into(),
+            model: model.into(),
+            max_context: 32000,
             supports_tools: true,
         })
     }
@@ -135,7 +147,7 @@ struct ApiRequest {
 struct ApiMessage {
     role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    content: Option<String>,
+    content: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_calls: Option<Vec<ApiToolCallOut>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -214,35 +226,52 @@ fn role_to_str(role: &MessageRole) -> &str {
 #[async_trait]
 impl ModelProvider for OpenAICompatProvider {
     async fn chat(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
-        let messages: Vec<ApiMessage> = request.messages.iter().map(|m| {
-            let tool_calls_out = m.tool_calls.as_ref().map(|tcs| {
-                tcs.iter().map(|tc| ApiToolCallOut {
-                    id: tc.id.clone(),
-                    call_type: "function".into(),
-                    function: ApiFunctionOut {
-                        name: tc.name.clone(),
-                        arguments: tc.arguments.clone(),
-                    },
-                }).collect()
-            });
-            ApiMessage {
-                role: role_to_str(&m.role).into(),
-                content: if m.content.is_empty() && m.tool_calls.is_some() { None } else { Some(m.content.clone()) },
-                tool_calls: tool_calls_out,
-                tool_call_id: m.tool_call_id.clone(),
-                name: m.name.clone(),
-            }
-        }).collect();
+        let messages: Vec<ApiMessage> = request
+            .messages
+            .iter()
+            .map(|m| {
+                let tool_calls_out = m.tool_calls.as_ref().map(|tcs| {
+                    tcs.iter()
+                        .map(|tc| ApiToolCallOut {
+                            id: tc.id.clone(),
+                            call_type: "function".into(),
+                            function: ApiFunctionOut {
+                                name: tc.name.clone(),
+                                arguments: tc.arguments.clone(),
+                            },
+                        })
+                        .collect()
+                });
+                let content_val = if m.content.is_empty() && m.tool_calls.is_some() {
+                    None
+                } else if m.content.starts_with("[{\"type\"") {
+                    serde_json::from_str(&m.content).ok()
+                } else {
+                    Some(serde_json::Value::String(m.content.clone()))
+                };
+                ApiMessage {
+                    role: role_to_str(&m.role).into(),
+                    content: content_val,
+                    tool_calls: tool_calls_out,
+                    tool_call_id: m.tool_call_id.clone(),
+                    name: m.name.clone(),
+                }
+            })
+            .collect();
 
         let openai_tools: Option<Vec<serde_json::Value>> = request.tools.as_ref().map(|defs| {
-            defs.iter().map(|d| serde_json::json!({
-                "type": "function",
-                "function": {
-                    "name": d.name,
-                    "description": d.description,
-                    "parameters": d.parameters,
-                }
-            })).collect()
+            defs.iter()
+                .map(|d| {
+                    serde_json::json!({
+                        "type": "function",
+                        "function": {
+                            "name": d.name,
+                            "description": d.description,
+                            "parameters": d.parameters,
+                        }
+                    })
+                })
+                .collect()
         });
 
         let api_req = ApiRequest {
@@ -254,7 +283,8 @@ impl ModelProvider for OpenAICompatProvider {
             stream: false,
         };
 
-        let mut req_builder = self.client
+        let mut req_builder = self
+            .client
             .post(format!("{}/chat/completions", self.config.base_url))
             .json(&api_req);
 
@@ -263,8 +293,8 @@ impl ModelProvider for OpenAICompatProvider {
                 .header("x-api-key", &self.config.api_key)
                 .header("anthropic-version", "2023-06-01");
         } else {
-            req_builder = req_builder
-                .header("Authorization", format!("Bearer {}", self.config.api_key));
+            req_builder =
+                req_builder.header("Authorization", format!("Bearer {}", self.config.api_key));
         }
 
         let resp = req_builder.send().await?;
@@ -272,21 +302,42 @@ impl ModelProvider for OpenAICompatProvider {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            anyhow::bail!("[{}] API error {}: {}", self.config.provider_name, status, body);
+            anyhow::bail!(
+                "[{}] API error {}: {}",
+                self.config.provider_name,
+                status,
+                body
+            );
         }
 
         let api_resp: ApiResponse = resp.json().await?;
-        let choice = api_resp.choices.into_iter().next()
+        let choice = api_resp
+            .choices
+            .into_iter()
+            .next()
             .ok_or_else(|| anyhow::anyhow!("empty response from model"))?;
 
-        let msg = choice.message.unwrap_or(ApiResponseMessage { content: None, tool_calls: None });
+        let msg = choice.message.unwrap_or(ApiResponseMessage {
+            content: None,
+            tool_calls: None,
+        });
 
         let tool_calls = msg.tool_calls.map(|tcs| {
-            tcs.into_iter().map(|tc| ToolCall {
-                id: tc.id.unwrap_or_default(),
-                name: tc.function.as_ref().and_then(|f| f.name.clone()).unwrap_or_default(),
-                arguments: tc.function.as_ref().and_then(|f| f.arguments.clone()).unwrap_or_default(),
-            }).collect()
+            tcs.into_iter()
+                .map(|tc| ToolCall {
+                    id: tc.id.unwrap_or_default(),
+                    name: tc
+                        .function
+                        .as_ref()
+                        .and_then(|f| f.name.clone())
+                        .unwrap_or_default(),
+                    arguments: tc
+                        .function
+                        .as_ref()
+                        .and_then(|f| f.arguments.clone())
+                        .unwrap_or_default(),
+                })
+                .collect()
         });
 
         Ok(ChatResponse {
@@ -308,15 +359,24 @@ impl ModelProvider for OpenAICompatProvider {
     }
 
     async fn chat_stream(&self, request: ChatRequest) -> anyhow::Result<ChatStream> {
-        let messages: Vec<ApiMessage> = request.messages.iter().map(|m| {
-            ApiMessage {
-                role: role_to_str(&m.role).into(),
-                content: if m.content.is_empty() && m.tool_calls.is_some() { None } else { Some(m.content.clone()) },
-                tool_calls: None,
-                tool_call_id: m.tool_call_id.clone(),
-                name: m.name.clone(),
-            }
-        }).collect();
+        let messages: Vec<ApiMessage> = request
+            .messages
+            .iter()
+            .map(|m| {
+                let content_val = if m.content.is_empty() && m.tool_calls.is_some() {
+                    None
+                } else {
+                    Some(serde_json::Value::String(m.content.clone()))
+                };
+                ApiMessage {
+                    role: role_to_str(&m.role).into(),
+                    content: content_val,
+                    tool_calls: None,
+                    tool_call_id: m.tool_call_id.clone(),
+                    name: m.name.clone(),
+                }
+            })
+            .collect();
 
         let api_req = ApiRequest {
             model: self.config.model.clone(),
@@ -327,7 +387,8 @@ impl ModelProvider for OpenAICompatProvider {
             stream: true,
         };
 
-        let mut req_builder = self.client
+        let mut req_builder = self
+            .client
             .post(format!("{}/chat/completions", self.config.base_url))
             .json(&api_req);
 
@@ -336,8 +397,8 @@ impl ModelProvider for OpenAICompatProvider {
                 .header("x-api-key", &self.config.api_key)
                 .header("anthropic-version", "2023-06-01");
         } else {
-            req_builder = req_builder
-                .header("Authorization", format!("Bearer {}", self.config.api_key));
+            req_builder =
+                req_builder.header("Authorization", format!("Bearer {}", self.config.api_key));
         }
 
         let resp = req_builder.send().await?;
@@ -345,7 +406,12 @@ impl ModelProvider for OpenAICompatProvider {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            anyhow::bail!("[{}] API error {}: {}", self.config.provider_name, status, body);
+            anyhow::bail!(
+                "[{}] API error {}: {}",
+                self.config.provider_name,
+                status,
+                body
+            );
         }
 
         let (tx, rx) = tokio::sync::mpsc::channel::<anyhow::Result<ChatChunk>>(64);

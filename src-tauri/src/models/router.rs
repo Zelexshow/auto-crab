@@ -1,6 +1,6 @@
-use super::provider::*;
-use super::openai_compat::OpenAICompatProvider;
 use super::ollama::OllamaProvider;
+use super::openai_compat::OpenAICompatProvider;
+use super::provider::*;
 use crate::config::{AppConfig, ModelEntry};
 use crate::security::credentials::CredentialStore;
 use std::collections::HashMap;
@@ -38,9 +38,22 @@ impl ModelRouter {
             }
         }
 
-        let primary_key = config.models.primary.as_ref()
+        if let Some(ref entry) = config.models.vision {
+            let key = format!("vision:{}", entry.provider);
+            if let Ok(provider) = Self::build_provider(entry) {
+                providers.insert(key, Arc::from(provider));
+            }
+        }
+
+        let primary_key = config
+            .models
+            .primary
+            .as_ref()
             .map(|e| format!("primary:{}", e.provider));
-        let fallback_key = config.models.fallback.as_ref()
+        let fallback_key = config
+            .models
+            .fallback
+            .as_ref()
             .map(|e| format!("fallback:{}", e.provider));
 
         Ok(Self {
@@ -52,20 +65,47 @@ impl ModelRouter {
     }
 
     fn build_provider(entry: &ModelEntry) -> anyhow::Result<Box<dyn ModelProvider>> {
-        let api_key = entry.api_key_ref.as_deref()
+        let api_key = entry
+            .api_key_ref
+            .as_deref()
             .map(CredentialStore::resolve_ref)
             .transpose()?
             .unwrap_or_default();
 
         match entry.provider.as_str() {
-            "openai" => Ok(Box::new(OpenAICompatProvider::openai(&api_key, &entry.model))),
-            "deepseek" => Ok(Box::new(OpenAICompatProvider::deepseek(&api_key, &entry.model))),
-            "dashscope" => Ok(Box::new(OpenAICompatProvider::dashscope(&api_key, &entry.model))),
-            "zhipu" => Ok(Box::new(OpenAICompatProvider::zhipu(&api_key, &entry.model))),
-            "moonshot" => Ok(Box::new(OpenAICompatProvider::moonshot(&api_key, &entry.model))),
-            "anthropic" => Ok(Box::new(OpenAICompatProvider::anthropic(&api_key, &entry.model))),
+            "openai" => Ok(Box::new(OpenAICompatProvider::openai(
+                &api_key,
+                &entry.model,
+            ))),
+            "deepseek" => Ok(Box::new(OpenAICompatProvider::deepseek(
+                &api_key,
+                &entry.model,
+            ))),
+            "dashscope" => Ok(Box::new(OpenAICompatProvider::dashscope(
+                &api_key,
+                &entry.model,
+            ))),
+            "dashscope_vl" => Ok(Box::new(OpenAICompatProvider::dashscope_vl(
+                &api_key,
+                &entry.model,
+            ))),
+            "zhipu" => Ok(Box::new(OpenAICompatProvider::zhipu(
+                &api_key,
+                &entry.model,
+            ))),
+            "moonshot" => Ok(Box::new(OpenAICompatProvider::moonshot(
+                &api_key,
+                &entry.model,
+            ))),
+            "anthropic" => Ok(Box::new(OpenAICompatProvider::anthropic(
+                &api_key,
+                &entry.model,
+            ))),
             "ollama" => {
-                let endpoint = entry.endpoint.as_deref().unwrap_or("http://localhost:11434");
+                let endpoint = entry
+                    .endpoint
+                    .as_deref()
+                    .unwrap_or("http://localhost:11434");
                 Ok(Box::new(OllamaProvider::new(endpoint, &entry.model)))
             }
             other => anyhow::bail!("Unknown model provider: {}", other),
@@ -82,21 +122,33 @@ impl ModelRouter {
             }
         }
 
-        self.primary_key.as_ref()
+        self.primary_key
+            .as_ref()
             .and_then(|k| self.providers.get(k))
             .map(Arc::clone)
     }
 
     pub fn get_primary(&self) -> Option<Arc<dyn ModelProvider>> {
-        self.primary_key.as_ref()
+        self.primary_key
+            .as_ref()
             .and_then(|k| self.providers.get(k))
             .map(Arc::clone)
     }
 
     pub fn get_fallback(&self) -> Option<Arc<dyn ModelProvider>> {
-        self.fallback_key.as_ref()
+        self.fallback_key
+            .as_ref()
             .and_then(|k| self.providers.get(k))
             .map(Arc::clone)
+    }
+
+    pub fn get_provider(&self, slot: &str) -> Option<Arc<dyn ModelProvider>> {
+        for (key, provider) in &self.providers {
+            if key.starts_with(&format!("{}:", slot)) {
+                return Some(Arc::clone(provider));
+            }
+        }
+        None
     }
 
     /// Try primary, fall back to fallback on error

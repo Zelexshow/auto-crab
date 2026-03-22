@@ -7,26 +7,28 @@ pub struct CredentialStore;
 
 impl CredentialStore {
     pub fn store(key: &str, secret: &str) -> Result<()> {
-        let entry = Entry::new(SERVICE_NAME, key)
-            .context("failed to create keyring entry")?;
-        entry.set_password(secret)
+        let entry = Entry::new(SERVICE_NAME, key).context("failed to create keyring entry")?;
+        entry
+            .set_password(secret)
             .context("failed to store credential in system keychain")?;
         tracing::info!("Credential stored: {}", key);
         Ok(())
     }
 
     pub fn retrieve(key: &str) -> Result<String> {
-        let entry = Entry::new(SERVICE_NAME, key)
-            .context("failed to create keyring entry")?;
-        entry.get_password()
-            .context(format!("failed to retrieve credential '{}' from system keychain", key))
+        let entry = Entry::new(SERVICE_NAME, key).context("failed to create keyring entry")?;
+        entry.get_password().context(format!(
+            "failed to retrieve credential '{}' from system keychain",
+            key
+        ))
     }
 
     pub fn delete(key: &str) -> Result<()> {
-        let entry = Entry::new(SERVICE_NAME, key)
-            .context("failed to create keyring entry")?;
-        entry.delete_credential()
-            .context(format!("failed to delete credential '{}' from system keychain", key))?;
+        let entry = Entry::new(SERVICE_NAME, key).context("failed to create keyring entry")?;
+        entry.delete_credential().context(format!(
+            "failed to delete credential '{}' from system keychain",
+            key
+        ))?;
         tracing::info!("Credential deleted: {}", key);
         Ok(())
     }

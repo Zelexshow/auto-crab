@@ -37,11 +37,7 @@ pub struct RemoteResponse {
 }
 
 /// Security: Validate that the user is allowed to send remote commands
-pub fn validate_remote_user(
-    user_id: &str,
-    allowed_ids: &[String],
-    source: &RemoteSource,
-) -> bool {
+pub fn validate_remote_user(user_id: &str, allowed_ids: &[String], source: &RemoteSource) -> bool {
     if allowed_ids.is_empty() {
         tracing::warn!(
             "Remote control from {:?} has no user allowlist configured - rejecting all",

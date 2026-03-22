@@ -29,7 +29,10 @@ pub struct PluginCallResult {
 impl PluginSandbox {
     pub fn new(manifest: PluginManifest, plugin_dir: PathBuf) -> Self {
         let wasm_path = plugin_dir.join(&manifest.wasm_file);
-        Self { manifest, wasm_path }
+        Self {
+            manifest,
+            wasm_path,
+        }
     }
 
     pub fn name(&self) -> &str {
@@ -45,25 +48,37 @@ impl PluginSandbox {
         match operation {
             "file_read" => {
                 if !self.manifest.permissions.file_read {
-                    anyhow::bail!("Plugin '{}' does not have file_read permission", self.manifest.name);
+                    anyhow::bail!(
+                        "Plugin '{}' does not have file_read permission",
+                        self.manifest.name
+                    );
                 }
                 self.check_path_allowed(target)?;
             }
             "file_write" => {
                 if !self.manifest.permissions.file_write {
-                    anyhow::bail!("Plugin '{}' does not have file_write permission", self.manifest.name);
+                    anyhow::bail!(
+                        "Plugin '{}' does not have file_write permission",
+                        self.manifest.name
+                    );
                 }
                 self.check_path_allowed(target)?;
             }
             "network" => {
                 if !self.manifest.permissions.network {
-                    anyhow::bail!("Plugin '{}' does not have network permission", self.manifest.name);
+                    anyhow::bail!(
+                        "Plugin '{}' does not have network permission",
+                        self.manifest.name
+                    );
                 }
                 self.check_domain_allowed(target)?;
             }
             "shell" => {
                 if !self.manifest.permissions.shell {
-                    anyhow::bail!("Plugin '{}' does not have shell permission", self.manifest.name);
+                    anyhow::bail!(
+                        "Plugin '{}' does not have shell permission",
+                        self.manifest.name
+                    );
                 }
             }
             _ => {
@@ -84,7 +99,9 @@ impl PluginSandbox {
         }
         anyhow::bail!(
             "Plugin '{}': path '{}' is outside allowed paths: {:?}",
-            self.manifest.name, path, self.manifest.permissions.allowed_paths
+            self.manifest.name,
+            path,
+            self.manifest.permissions.allowed_paths
         );
     }
 
@@ -104,7 +121,9 @@ impl PluginSandbox {
         }
         anyhow::bail!(
             "Plugin '{}': domain '{}' is not allowed: {:?}",
-            self.manifest.name, domain, self.manifest.permissions.allowed_domains
+            self.manifest.name,
+            domain,
+            self.manifest.permissions.allowed_domains
         );
     }
 
@@ -113,7 +132,9 @@ impl PluginSandbox {
     pub async fn call(&self, function: &str, args: &str) -> PluginCallResult {
         tracing::info!(
             "Plugin '{}' call: {}({})",
-            self.manifest.name, function, &args[..args.len().min(100)]
+            self.manifest.name,
+            function,
+            &args[..args.len().min(100)]
         );
 
         // TODO: Wire up wasmtime execution here.

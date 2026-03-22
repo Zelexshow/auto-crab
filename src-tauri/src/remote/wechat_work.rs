@@ -55,14 +55,14 @@ impl WechatWorkBot {
             anyhow::bail!("WeChat Work token error: {}", resp.errmsg);
         }
 
-        let token = resp.access_token
+        let token = resp
+            .access_token
             .ok_or_else(|| anyhow::anyhow!("no token in response"))?;
         let expires_in = resp.expires_in.unwrap_or(7200);
 
         self.access_token = Some(token.clone());
-        self.token_expires_at = Some(
-            chrono::Utc::now() + chrono::Duration::seconds(expires_in - 300)
-        );
+        self.token_expires_at =
+            Some(chrono::Utc::now() + chrono::Duration::seconds(expires_in - 300));
 
         Ok(token)
     }
@@ -95,11 +95,22 @@ impl WechatWorkBot {
     }
 
     pub fn parse_message(&self, xml_or_json: &str, user_id: &str) -> Option<RemoteCommand> {
-        if !validate_remote_user(user_id, &self.config.allowed_user_ids, &RemoteSource::WechatWork) {
-            tracing::warn!("Rejected WeChat Work message from unauthorized user: {}", user_id);
+        if !validate_remote_user(
+            user_id,
+            &self.config.allowed_user_ids,
+            &RemoteSource::WechatWork,
+        ) {
+            tracing::warn!(
+                "Rejected WeChat Work message from unauthorized user: {}",
+                user_id
+            );
             return None;
         }
 
-        Some(parse_command(xml_or_json, user_id, RemoteSource::WechatWork))
+        Some(parse_command(
+            xml_or_json,
+            user_id,
+            RemoteSource::WechatWork,
+        ))
     }
 }

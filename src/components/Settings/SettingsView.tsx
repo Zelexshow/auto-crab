@@ -1,10 +1,12 @@
 import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Save, Key, Shield, Bot, Globe, Terminal, ChevronRight, Loader2 } from "lucide-react";
+import { open as dialogOpen } from "@tauri-apps/plugin-dialog";
+import { Save, Key, Shield, Bot, Globe, Terminal, ChevronRight, Loader2, FolderOpen } from "lucide-react";
 
 const PROVIDERS = [
   { value: "", label: "未配置" },
   { value: "dashscope", label: "通义千问 (DashScope)" },
+  { value: "dashscope_vl", label: "通义千问 VL (视觉多模态)" },
   { value: "deepseek", label: "DeepSeek" },
   { value: "zhipu", label: "智谱 GLM" },
   { value: "moonshot", label: "月之暗面 Kimi" },
@@ -12,6 +14,45 @@ const PROVIDERS = [
   { value: "anthropic", label: "Anthropic Claude" },
   { value: "ollama", label: "Ollama (本地)" },
 ];
+
+const MODEL_SUGGESTIONS: Record<string, { value: string; label: string }[]> = {
+  dashscope: [
+    { value: "qwen-max", label: "qwen-max (最强)" },
+    { value: "qwen-plus", label: "qwen-plus (均衡)" },
+    { value: "qwen-turbo", label: "qwen-turbo (快速)" },
+    { value: "qwen3-plus", label: "qwen3-plus (最新)" },
+  ],
+  dashscope_vl: [
+    { value: "qwen3-vl-plus", label: "qwen3-vl-plus (视觉推荐)" },
+    { value: "qwen2.5-vl-plus", label: "qwen2.5-vl-plus" },
+  ],
+  deepseek: [
+    { value: "deepseek-chat", label: "deepseek-chat (对话)" },
+    { value: "deepseek-reasoner", label: "deepseek-reasoner (推理)" },
+  ],
+  zhipu: [
+    { value: "glm-4-plus", label: "glm-4-plus" },
+    { value: "glm-4", label: "glm-4" },
+  ],
+  moonshot: [
+    { value: "moonshot-v1-128k", label: "moonshot-v1-128k (长文)" },
+    { value: "moonshot-v1-32k", label: "moonshot-v1-32k" },
+  ],
+  openai: [
+    { value: "gpt-4o", label: "gpt-4o" },
+    { value: "gpt-4o-mini", label: "gpt-4o-mini" },
+    { value: "o3-mini", label: "o3-mini (推理)" },
+  ],
+  anthropic: [
+    { value: "claude-sonnet-4-20250514", label: "Claude Sonnet 4" },
+    { value: "claude-3-5-haiku-20241022", label: "Claude 3.5 Haiku" },
+  ],
+  ollama: [
+    { value: "qwen2.5:14b", label: "qwen2.5:14b" },
+    { value: "llama3.1:8b", label: "llama3.1:8b" },
+    { value: "deepseek-r1:14b", label: "deepseek-r1:14b" },
+  ],
+};
 
 export function SettingsView() {
   const [activeTab, setActiveTab] = useState<string>("models");
@@ -47,6 +88,7 @@ export function SettingsView() {
   const [saveMsg, setSaveMsg] = useState("");
   const [configSaving, setConfigSaving] = useState(false);
   const [configSaveMsg, setConfigSaveMsg] = useState("");
+  const [credentialStatuses, setCredentialStatuses] = useState<Record<string, boolean>>({});
 
   // Load actual config on mount
   useEffect(() => {
@@ -91,46 +133,63 @@ export function SettingsView() {
       }
       setConfigLoaded(true);
     }).catch(() => setConfigLoaded(true));
+
+    const knownKeys = ["dashscope", "deepseek", "zhipu", "moonshot", "openai", "anthropic", "feishu-secret", "wechat-work-secret"];
+    invoke<{ success: boolean; data?: { key: string; exists: boolean }[] }>("check_credentials", { keys: knownKeys }).then((res) => {
+      if (res.success && res.data) {
+        const m: Record<string, boolean> = {};
+        res.data.forEach((s) => { m[s.key] = s.exists; });
+        setCredentialStatuses(m);
+      }
+    }).catch(() => {});
   }, []);
 
   const handleSaveConfig = async () => {
     setConfigSaving(true);
     setConfigSaveMsg("");
     try {
+      const existing = await invoke<{ success: boolean; data?: any }>("get_config");
+      const base = existing.success && existing.data ? existing.data : {};
+
       const cfg: any = {
-        general: { language: "zh-CN", theme: "system", first_run: false },
+        ...base,
+        general: { ...(base.general || {}), language: "zh-CN", theme: base.general?.theme ?? "system", first_run: false },
         models: {
-          routing: {},
-          primary: primaryProvider ? { provider: primaryProvider, model: primaryModel, api_key_ref: `keychain://${primaryProvider}` } : null,
-          fallback: fallbackProvider ? { provider: fallbackProvider, model: fallbackModel, ...(fallbackProvider === "ollama" ? { endpoint: fallbackEndpoint } : {}) } : null,
-          coding: codingProvider ? { provider: codingProvider, model: codingModel, api_key_ref: `keychain://${codingProvider}` } : null,
+          ...(base.models || {}),
+          routing: base.models?.routing ?? {},
+          primary: primaryProvider ? { provider: primaryProvider, model: primaryModel, api_key_ref: `keychain://${primaryProvider}` } : base.models?.primary ?? null,
+          fallback: fallbackProvider ? { provider: fallbackProvider, model: fallbackModel, ...(fallbackProvider === "ollama" ? { endpoint: fallbackEndpoint } : {}), api_key_ref: fallbackProvider !== "ollama" ? `keychain://${fallbackProvider}` : undefined } : base.models?.fallback ?? null,
+          coding: codingProvider ? { provider: codingProvider, model: codingModel, api_key_ref: `keychain://${codingProvider}` } : base.models?.coding ?? null,
         },
-        agent: { name: "小蟹", personality: "professional", max_context_tokens: 128000, system_prompt: "你是 Auto Crab（小蟹），一个安全、可控的桌面 AI 助理。请用中文回复。" },
-        security: { master_password_required: true, auto_lock_minutes: parseInt(autoLockMin) || 15, risk_overrides: {} },
+        agent: base.agent ?? { name: "小蟹", personality: "professional", max_context_tokens: 128000, system_prompt: "" },
+        security: { ...(base.security || {}), auto_lock_minutes: parseInt(autoLockMin) || 15 },
         tools: {
+          ...(base.tools || {}),
           shell_enabled: shellEnabled,
-          shell_allowed_commands: shellCommands.split(",").map((s) => s.trim()).filter(Boolean),
+          shell_allowed_commands: shellCommands.split(",").map((s: string) => s.trim()).filter(Boolean),
           network_access: networkEnabled,
-          network_allowed_domains: networkDomains.split(",").map((s) => s.trim()).filter(Boolean),
-          file_access: fileAccess.split(",").map((s) => s.trim()).filter(Boolean),
+          network_allowed_domains: networkDomains.split(",").map((s: string) => s.trim()).filter(Boolean),
+          file_access: fileAccess.split(",").map((s: string) => s.trim()).filter(Boolean),
         },
         remote: {
+          ...(base.remote || {}),
           enabled: remoteEnabled,
           feishu: remoteEnabled && feishuAppId ? {
+            ...(base.remote?.feishu || {}),
             app_id: feishuAppId,
             app_secret_ref: "keychain://feishu-secret",
             poll_interval_secs: parseInt(feishuPollInterval) || 30,
-            allowed_user_ids: feishuAllowedUsers.split(",").map((s) => s.trim()).filter(Boolean),
-          } : null,
+            allowed_user_ids: feishuAllowedUsers.split(",").map((s: string) => s.trim()).filter(Boolean),
+          } : base.remote?.feishu ?? null,
           wechat_work: remoteEnabled && wechatCorpId ? {
+            ...(base.remote?.wechat_work || {}),
             corp_id: wechatCorpId,
             agent_id: wechatAgentId,
             secret_ref: "keychain://wechat-work-secret",
             poll_interval_secs: parseInt(wechatPollInterval) || 30,
-            allowed_user_ids: [],
-          } : null,
+          } : base.remote?.wechat_work ?? null,
         },
-        scheduled_tasks: { enabled: false, require_confirmation: true, jobs: [] },
+        scheduled_tasks: base.scheduled_tasks ?? { enabled: false, require_confirmation: true, jobs: [] },
       };
       await invoke("save_config", { configData: cfg });
       setConfigSaveMsg("✅ 配置已保存，重启应用后生效");
@@ -213,15 +272,18 @@ export function SettingsView() {
             <Section title="模型配置" desc="配置 AI 模型。支持国产模型、国际模型和本地 Ollama。">
               <Card title="主模型" desc="日常对话使用">
                 <Row label="提供商">
-                  <Select value={primaryProvider} onChange={setPrimaryProvider} options={PROVIDERS} />
+                  <Select value={primaryProvider} onChange={(v) => { setPrimaryProvider(v); setPrimaryModel(MODEL_SUGGESTIONS[v]?.[0]?.value ?? ""); }} options={PROVIDERS} />
                 </Row>
                 <Row label="模型名">
-                  <Input value={primaryModel} onChange={setPrimaryModel} placeholder="qwen-max" />
+                  {MODEL_SUGGESTIONS[primaryProvider] ? (
+                    <Select value={primaryModel} onChange={setPrimaryModel} options={[...MODEL_SUGGESTIONS[primaryProvider], { value: "__custom__", label: "自定义..." }]} />
+                  ) : (
+                    <Input value={primaryModel} onChange={setPrimaryModel} placeholder="输入模型名称" />
+                  )}
+                  {primaryModel === "__custom__" && <Input value="" onChange={setPrimaryModel} placeholder="输入自定义模型名" />}
                 </Row>
                 <Row label="API Key">
-                  <span className="text-xs" style={{ color: "var(--text-muted)" }}>
-                    在「密钥管理」中配置，引用名: <code className="px-1 py-0.5 rounded text-[11px]" style={{ background: "var(--bg-tertiary)" }}>keychain://dashscope</code>
-                  </span>
+                  <KeyStatus provider={primaryProvider} statuses={credentialStatuses} />
                 </Row>
               </Card>
 
@@ -319,13 +381,29 @@ export function SettingsView() {
 
               <Card title="文件访问" desc="AI 可读写的目录范围">
                 <Row label="允许的目录">
-                  <Input
-                    value={fileAccess}
-                    onChange={setFileAccess}
-                    placeholder="留空 = 仅当前工作目录"
-                  />
+                  <div className="flex gap-2">
+                    <div className="flex-1">
+                      <Input
+                        value={fileAccess}
+                        onChange={setFileAccess}
+                        placeholder="留空 = 允许所有目录"
+                      />
+                    </div>
+                    <button
+                      onClick={async () => {
+                        const dir = await dialogOpen({ directory: true, multiple: false, title: "选择允许访问的目录" });
+                        if (dir && typeof dir === "string") {
+                          setFileAccess((prev) => prev ? `${prev}, ${dir}` : dir);
+                        }
+                      }}
+                      className="shrink-0 px-3 py-1.5 rounded-md text-xs flex items-center gap-1"
+                      style={{ background: "var(--bg-tertiary)", color: "var(--text-secondary)" }}
+                    >
+                      <FolderOpen size={13} /> 选择
+                    </button>
+                  </div>
                   <p className="text-[11px] mt-1" style={{ color: "var(--text-muted)" }}>
-                    逗号分隔的目录路径。留空表示只能访问当前工作目录。
+                    逗号分隔的目录路径。留空表示允许访问所有目录。点击"选择"可用系统文件夹对话框添加。
                   </p>
                 </Row>
               </Card>
@@ -461,6 +539,14 @@ export function SettingsView() {
                 </div>
               </Card>
 
+              <Card title="已保存的密钥" desc="系统密钥链中当前存在的凭据">
+                <div className="space-y-1.5">
+                  {["dashscope", "deepseek", "zhipu", "moonshot", "openai", "anthropic", "feishu-secret", "wechat-work-secret"].map((k) => (
+                    <CredentialRow key={k} name={k} exists={credentialStatuses[k]} onEdit={(name) => { setKeyName(name); }} />
+                  ))}
+                </div>
+              </Card>
+
               <Card title="说明" desc="">
                 <div className="text-xs leading-5 space-y-1" style={{ color: "var(--text-muted)" }}>
                   <p>• 密钥存储在操作系统级别的加密存储中，不会出现在配置文件里</p>
@@ -500,6 +586,71 @@ export function SettingsView() {
             </span>
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+/* ================= KeyStatus Component ================= */
+
+function KeyStatus({ provider, statuses }: { provider: string; statuses: Record<string, boolean> }) {
+  const [preview, setPreview] = useState("");
+  useEffect(() => {
+    if (provider && statuses[provider]) {
+      invoke<{ success: boolean; data?: string }>("get_credential_preview", { key: provider }).then((res) => {
+        setPreview(res.data ?? "");
+      }).catch(() => {});
+    } else {
+      setPreview("");
+    }
+  }, [provider, statuses]);
+
+  if (!provider) return null;
+  const exists = statuses[provider];
+  return (
+    <div className="flex items-center gap-2">
+      <span className="inline-block w-2 h-2 rounded-full" style={{ background: exists ? "var(--success)" : "var(--danger)" }} />
+      <span className="text-xs" style={{ color: "var(--text-muted)" }}>
+        {exists
+          ? `已配置 ${preview ? `(${preview})` : ""} — keychain://${provider}`
+          : `未配置，请在「密钥管理」中保存 keychain://${provider}`}
+      </span>
+    </div>
+  );
+}
+
+/* ================= CredentialRow Component ================= */
+
+function CredentialRow({ name, exists, onEdit }: { name: string; exists: boolean; onEdit: (name: string) => void }) {
+  const [preview, setPreview] = useState("");
+  useEffect(() => {
+    if (exists) {
+      invoke<{ success: boolean; data?: string }>("get_credential_preview", { key: name }).then((res) => {
+        setPreview(res.data ?? "");
+      }).catch(() => {});
+    }
+  }, [name, exists]);
+
+  return (
+    <div className="flex items-center justify-between text-xs py-1.5 px-2 rounded" style={{ background: "var(--bg-primary)" }}>
+      <div className="flex items-center gap-2">
+        <span className="inline-block w-2 h-2 rounded-full" style={{ background: exists ? "var(--success)" : "var(--bg-tertiary)" }} />
+        <code>{name}</code>
+        {exists && preview && <span style={{ color: "var(--text-muted)" }}>({preview})</span>}
+      </div>
+      <div className="flex items-center gap-2">
+        {exists ? (
+          <span style={{ color: "var(--success)" }}>已保存</span>
+        ) : (
+          <span style={{ color: "var(--text-muted)" }}>未配置</span>
+        )}
+        <button
+          onClick={() => onEdit(name)}
+          className="px-2 py-0.5 rounded text-[11px] transition-colors"
+          style={{ background: "var(--bg-tertiary)", color: "var(--text-secondary)" }}
+        >
+          {exists ? "修改" : "添加"}
+        </button>
       </div>
     </div>
   );

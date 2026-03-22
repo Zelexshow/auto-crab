@@ -46,7 +46,8 @@ impl SnapshotStore {
 
         let id = uuid::Uuid::new_v4().to_string();
         let timestamp = Utc::now().format("%Y%m%d_%H%M%S").to_string();
-        let file_name = path.file_name()
+        let file_name = path
+            .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "unknown".into());
 
@@ -76,7 +77,9 @@ impl SnapshotStore {
     /// Restore a file from a snapshot (undo).
     pub async fn restore(&self, snapshot_id: &str) -> Result<String> {
         let index = self.load_index().await?;
-        let snapshot = index.snapshots.iter()
+        let snapshot = index
+            .snapshots
+            .iter()
             .find(|s| s.id == snapshot_id)
             .ok_or_else(|| anyhow::anyhow!("Snapshot not found: {}", snapshot_id))?;
 
@@ -91,7 +94,11 @@ impl SnapshotStore {
         }
 
         fs::copy(src, dest).await?;
-        tracing::info!("Restored: {} from snapshot {}", snapshot.original_path, snapshot_id);
+        tracing::info!(
+            "Restored: {} from snapshot {}",
+            snapshot.original_path,
+            snapshot_id
+        );
 
         Ok(snapshot.original_path.clone())
     }

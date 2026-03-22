@@ -40,7 +40,9 @@ impl BrowserAutomation {
 
     /// Fetch a page's text content using headless Chrome --dump-dom.
     pub async fn fetch_page_text(&self, url: &str) -> Result<PageContent> {
-        let chrome = self.chrome_path.as_ref()
+        let chrome = self
+            .chrome_path
+            .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Chrome/Edge not found"))?;
 
         let output = tokio::time::timeout(
@@ -56,8 +58,9 @@ impl BrowserAutomation {
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .output(),
-        ).await
-            .map_err(|_| anyhow::anyhow!("Chrome timed out after 30s"))??;
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("Chrome timed out after 30s"))??;
 
         let html = String::from_utf8_lossy(&output.stdout).to_string();
 
@@ -71,13 +74,19 @@ impl BrowserAutomation {
             } else {
                 text
             },
-            status: if output.status.success() { "ok".into() } else { "error".into() },
+            status: if output.status.success() {
+                "ok".into()
+            } else {
+                "error".into()
+            },
         })
     }
 
     /// Take a screenshot of a page (saves to file).
     pub async fn screenshot(&self, url: &str, output_path: &str) -> Result<String> {
-        let chrome = self.chrome_path.as_ref()
+        let chrome = self
+            .chrome_path
+            .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Chrome/Edge not found"))?;
 
         let output = tokio::time::timeout(
@@ -94,8 +103,9 @@ impl BrowserAutomation {
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .output(),
-        ).await
-            .map_err(|_| anyhow::anyhow!("Chrome screenshot timed out"))??;
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("Chrome screenshot timed out"))??;
 
         if output.status.success() {
             Ok(output_path.to_string())
@@ -139,7 +149,11 @@ fn detect_chrome() -> Option<String> {
     // Try `which` on Linux/macOS
     if !cfg!(target_os = "windows") {
         for name in ["google-chrome", "chromium-browser", "chromium"] {
-            if std::process::Command::new("which").arg(name).output().is_ok_and(|o| o.status.success()) {
+            if std::process::Command::new("which")
+                .arg(name)
+                .output()
+                .is_ok_and(|o| o.status.success())
+            {
                 return Some(name.to_string());
             }
         }
@@ -170,10 +184,18 @@ fn extract_text_from_html(html: &str) -> String {
         if !in_tag && chars[i] == '<' {
             in_tag = true;
             let rest: String = lower_chars[i..].iter().take(10).collect();
-            if rest.starts_with("<script") { in_script = true; }
-            if rest.starts_with("<style") { in_style = true; }
-            if rest.starts_with("</script") { in_script = false; }
-            if rest.starts_with("</style") { in_style = false; }
+            if rest.starts_with("<script") {
+                in_script = true;
+            }
+            if rest.starts_with("<style") {
+                in_style = true;
+            }
+            if rest.starts_with("</script") {
+                in_script = false;
+            }
+            if rest.starts_with("</style") {
+                in_style = false;
+            }
         } else if in_tag && chars[i] == '>' {
             in_tag = false;
         } else if !in_tag && !in_script && !in_style {
@@ -183,7 +205,8 @@ fn extract_text_from_html(html: &str) -> String {
     }
 
     // Clean up whitespace
-    let lines: Vec<&str> = text.lines()
+    let lines: Vec<&str> = text
+        .lines()
         .map(|l| l.trim())
         .filter(|l| !l.is_empty())
         .collect();

@@ -66,10 +66,14 @@ fn role_to_str(role: &MessageRole) -> &str {
 #[async_trait]
 impl ModelProvider for OllamaProvider {
     async fn chat(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
-        let messages: Vec<OllamaMessage> = request.messages.iter().map(|m| OllamaMessage {
-            role: role_to_str(&m.role).into(),
-            content: m.content.clone(),
-        }).collect();
+        let messages: Vec<OllamaMessage> = request
+            .messages
+            .iter()
+            .map(|m| OllamaMessage {
+                role: role_to_str(&m.role).into(),
+                content: m.content.clone(),
+            })
+            .collect();
 
         let api_req = OllamaChatRequest {
             model: self.model.clone(),
@@ -81,7 +85,8 @@ impl ModelProvider for OllamaProvider {
             }),
         };
 
-        let resp = self.client
+        let resp = self
+            .client
             .post(format!("{}/api/chat", self.endpoint))
             .json(&api_req)
             .send()
@@ -110,7 +115,8 @@ impl ModelProvider for OllamaProvider {
             usage: Some(TokenUsage {
                 prompt_tokens: api_resp.prompt_eval_count.unwrap_or(0),
                 completion_tokens: api_resp.eval_count.unwrap_or(0),
-                total_tokens: api_resp.prompt_eval_count.unwrap_or(0) + api_resp.eval_count.unwrap_or(0),
+                total_tokens: api_resp.prompt_eval_count.unwrap_or(0)
+                    + api_resp.eval_count.unwrap_or(0),
             }),
             model: self.model.clone(),
             finish_reason: Some("stop".into()),
@@ -118,10 +124,14 @@ impl ModelProvider for OllamaProvider {
     }
 
     async fn chat_stream(&self, request: ChatRequest) -> anyhow::Result<ChatStream> {
-        let messages: Vec<OllamaMessage> = request.messages.iter().map(|m| OllamaMessage {
-            role: role_to_str(&m.role).into(),
-            content: m.content.clone(),
-        }).collect();
+        let messages: Vec<OllamaMessage> = request
+            .messages
+            .iter()
+            .map(|m| OllamaMessage {
+                role: role_to_str(&m.role).into(),
+                content: m.content.clone(),
+            })
+            .collect();
 
         let api_req = OllamaChatRequest {
             model: self.model.clone(),
@@ -133,7 +143,8 @@ impl ModelProvider for OllamaProvider {
             }),
         };
 
-        let resp = self.client
+        let resp = self
+            .client
             .post(format!("{}/api/chat", self.endpoint))
             .json(&api_req)
             .send()
@@ -158,7 +169,9 @@ impl ModelProvider for OllamaProvider {
                             let line = buffer[..line_end].trim().to_string();
                             buffer = buffer[line_end + 1..].to_string();
 
-                            if line.is_empty() { continue; }
+                            if line.is_empty() {
+                                continue;
+                            }
 
                             if let Ok(parsed) = serde_json::from_str::<OllamaChatResponse>(&line) {
                                 let content = parsed.message.map(|m| m.content).unwrap_or_default();

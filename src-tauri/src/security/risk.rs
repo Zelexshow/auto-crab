@@ -7,36 +7,56 @@ static DEFAULT_RISK_MAP: LazyLock<HashMap<&'static str, RiskLevel>> = LazyLock::
 
     // Safe - auto-execute without confirmation
     for op in [
-        "read_file", "list_directory", "search_web", "generate_text",
-        "get_time", "calculate", "read_clipboard",
+        "read_file",
+        "list_directory",
+        "search_web",
+        "generate_text",
+        "get_time",
+        "calculate",
+        "read_clipboard",
     ] {
         m.insert(op, RiskLevel::Safe);
     }
 
     // Moderate - requires user click confirmation
     for op in [
-        "write_file", "create_directory", "rename_file",
-        "git_add", "git_commit", "git_checkout",
-        "send_email_draft", "create_note",
+        "write_file",
+        "create_directory",
+        "rename_file",
+        "git_add",
+        "git_commit",
+        "git_checkout",
+        "send_email_draft",
+        "create_note",
     ] {
         m.insert(op, RiskLevel::Moderate);
     }
 
     // Dangerous - requires master password re-entry
     for op in [
-        "execute_shell", "delete_file", "delete_directory",
-        "send_email", "git_push", "git_force_push",
-        "network_request_external", "modify_config",
-        "install_package", "run_script",
+        "execute_shell",
+        "delete_file",
+        "delete_directory",
+        "send_email",
+        "git_push",
+        "git_force_push",
+        "network_request_external",
+        "modify_config",
+        "install_package",
+        "run_script",
     ] {
         m.insert(op, RiskLevel::Dangerous);
     }
 
     // Forbidden - never allowed
     for op in [
-        "format_disk", "modify_boot", "disable_firewall",
-        "access_credentials_raw", "modify_system_registry",
-        "shutdown_system", "kill_all_processes",
+        "format_disk",
+        "modify_boot",
+        "disable_firewall",
+        "access_credentials_raw",
+        "modify_system_registry",
+        "shutdown_system",
+        "kill_all_processes",
     ] {
         m.insert(op, RiskLevel::Forbidden);
     }
@@ -72,7 +92,10 @@ impl RiskEngine {
     }
 
     pub fn needs_confirmation(&self, operation: &str) -> bool {
-        matches!(self.assess(operation), RiskLevel::Moderate | RiskLevel::Dangerous)
+        matches!(
+            self.assess(operation),
+            RiskLevel::Moderate | RiskLevel::Dangerous
+        )
     }
 
     pub fn needs_password(&self, operation: &str) -> bool {

@@ -24,9 +24,11 @@ export function ChatView() {
   }, [messages]);
 
   useEffect(() => {
+    console.log("[ChatView] Setting up event listeners");
     const unlisten = listen<{ stream_id: string; delta: string; done: boolean }>(
       "chat-stream-chunk",
       (event) => {
+        console.log("[ChatView] chat-stream-chunk received:", event.payload.done, "delta len:", event.payload.delta?.length);
         const { delta, done } = event.payload;
         const msgId = streamingMsgId.current;
         if (msgId) {
@@ -37,6 +39,8 @@ export function ChatView() {
             setStreamId(null);
             streamingMsgId.current = null;
           }
+        } else {
+          console.warn("[ChatView] No streamingMsgId, event dropped");
         }
       },
     );

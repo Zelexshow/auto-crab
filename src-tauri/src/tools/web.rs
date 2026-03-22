@@ -17,7 +17,11 @@ impl WebRequester {
             .build()
             .expect("failed to build HTTP client");
 
-        Self { client, enabled, allowed_domains }
+        Self {
+            client,
+            enabled,
+            allowed_domains,
+        }
     }
 
     fn check_domain(&self, url: &str) -> Result<()> {
@@ -29,8 +33,7 @@ impl WebRequester {
             return Ok(());
         }
 
-        let parsed = url::Url::parse(url)
-            .map_err(|e| anyhow::anyhow!("Invalid URL: {}", e))?;
+        let parsed = url::Url::parse(url).map_err(|e| anyhow::anyhow!("Invalid URL: {}", e))?;
         let host = parsed.host_str().unwrap_or("");
 
         for pattern in &self.allowed_domains {
@@ -57,7 +60,9 @@ impl WebRequester {
 
         let resp = self.client.get(url).send().await?;
         let status = resp.status().as_u16();
-        let headers: Vec<(String, String)> = resp.headers().iter()
+        let headers: Vec<(String, String)> = resp
+            .headers()
+            .iter()
             .take(20)
             .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
             .collect();
@@ -69,17 +74,17 @@ impl WebRequester {
             body
         };
 
-        Ok(WebResponse { status, headers, body })
+        Ok(WebResponse {
+            status,
+            headers,
+            body,
+        })
     }
 
     pub async fn post_json(&self, url: &str, json_body: &serde_json::Value) -> Result<WebResponse> {
         self.check_domain(url)?;
 
-        let resp = self.client
-            .post(url)
-            .json(json_body)
-            .send()
-            .await?;
+        let resp = self.client.post(url).json(json_body).send().await?;
 
         let status = resp.status().as_u16();
         let body = resp.text().await?;

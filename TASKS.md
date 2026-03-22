@@ -91,6 +91,52 @@
 - [x] T-053: 飞书审批状态机接入（/task → ApprovalState → /approve 真实执行 → 结果回传）
 - [x] T-054: 完善飞书远程配置文档（docs/feishu-setup.md，含后台 checklist 和验收流程）
 
+## P8: 安全管控 + 屏幕能力 (Security & Vision) — 2026-03-21
+
+- [x] T-055: 审计日志 get_audit_log 接入真实 AuditLogger（内存缓存 + JSONL 持久化）
+- [x] T-056: 工具调用增加审计记录（dispatch_tool_with_audit，每次执行自动写审计日志）
+- [x] T-057: 工具调用前风险评估（RiskEngine 自动判断 Safe/Moderate/Dangerous/Forbidden）
+- [x] T-058: 新增截图工具 screenshot（xcap crate，保存 PNG，注册到工具列表）
+- [x] T-059: 文件操作路径 ~ 展开（shellexpand，Windows 兼容）
+- [x] T-060: Shell 白名单扩展（cmd/powershell/echo/dir/mkdir 等常用系统命令）
+- [x] T-061: 系统提示词增加 OS 上下文（Windows 路径格式、桌面路径、工具使用引导）
+- [x] T-062: 新增 Qwen2.5-VL-Plus 多模态视觉模型支持（dashscope_vl provider）
+- [x] T-063: Settings 模型配置显示 API Key 状态（已配置/未配置，绿/红指示灯）
+- [x] T-064: Settings 密钥管理显示已保存密钥列表（8 个常用密钥名的存在状态）
+- [x] T-065: Settings 保存配置改为"先读后写"合并模式（不覆盖 system_prompt、飞书白名单等）
+- [x] T-066: 新增 check_credentials 后端命令（批量检查密钥存在性）
+
+## P9: 交互操控 + 多会话 + UI 优化 — 2026-03-21
+
+- [x] T-067: 鼠标点击工具 mouse_click（enigo 0.2，坐标点击，左/右/双击）
+- [x] T-068: 键盘输入工具 keyboard_type（enigo 0.2，文本输入）
+- [x] T-069: 按键组合工具 key_press（ctrl+c/alt+tab/enter 等快捷键）
+- [x] T-070: 飞书多会话支持（/session 切换、/sessions 列表、独立上下文）
+- [x] T-071: Settings 模型名下拉（按 provider 自动推荐模型列表）
+- [x] T-072: Settings API Key 状态显示部分值（如 sk-ae****dd52）
+- [x] T-073: Settings 密钥管理列表显示部分值 + 编辑/添加按钮
+- [x] T-074: 新增 get_credential_preview 后端命令（获取密钥脱敏预览）
+
+## P10: 路由 + 监控 — 2026-03-21
+
+- [x] T-075: 新增 models.vision 配置槽位（独立于 coding，专用于视觉模型）
+- [x] T-076: /status 增强（显示模型配置、工具状态、用法提示）
+- [x] T-077: /status models 子命令（查看所有模型详细配置）
+- [x] T-078: 定时监控 /monitor <间隔> <描述>（定时截图→VL分析→飞书推送）
+- [x] T-079: /monitors 查看活跃监控任务列表
+- [x] T-080: /monitor stop <ID> 停止监控
+- [x] T-081: 监控任务后台 tokio 协程 + watch channel 取消机制
+
+## P11: 安全加固 + 工具补齐 — 2026-03-21
+
+- [x] T-082: 桌面端工具调用风险拦截（Moderate/Dangerous 弹审批窗，Forbidden 直接拒绝）
+- [x] T-083: 审批确认通道（DESKTOP_APPROVALS 全局 oneshot channel，approve/reject 解锁执行）
+- [x] T-084: write_file 前自动快照（SnapshotStore 集成，已有文件自动备份）
+- [x] T-085: /undo 命令撤回最近一次文件修改
+- [x] T-086: Settings 文件目录选择器（Tauri dialog 插件，系统对话框选择文件夹）
+- [x] T-087: 网页抓取工具 fetch_webpage（HTTP GET + HTML 去标签，用于文献/数据归纳）
+- [x] T-088: 桌面端 TaskPanel 显示工具调用过程（右侧面板，实时 agent-step 事件）
+
 ---
 
 ## 卡点记录
@@ -111,10 +157,18 @@
 | 2026-03-15 | T-028, T-031, T-043 | 任务监控面板 + 首次运行向导 + 审计日志查看器 |
 | 2026-03-15 | T-038~T-042 | 远程审批升级 + WASM沙箱 + 浏览器自动化 + 定时任务 + 操作回滚 |
 | 2026-03-21 | T-048~T-054 | Agent工具链接通 + 飞书上下文记忆 + 审批状态机 + Settings真实配置 |
+| 2026-03-21 | T-055~T-061 | 审计日志接通 + 风险评估 + 截图工具 + Shell白名单 + 路径修复 |
+| 2026-03-21 | T-062~T-066 | Qwen-VL多模态 + Settings密钥状态 + 配置合并保存 |
+| 2026-03-21 | T-067~T-074 | 鼠标键盘操控 + 飞书多会话 + Settings下拉/密钥预览 |
+| 2026-03-21 | T-075~T-081 | Vision槽位 + 定时监控 + /status增强 |
 
 ## 里程碑
 
 - ✅ 2026-03-14: 项目创建，环境搭建，核心架构完成
 - ✅ 2026-03-15: P0~P5 全部完成（47个任务中45个完成，2个有卡点已记录）
 - ✅ 2026-03-21: P7 能力联通（工具链真实执行 + 飞书完整远控闭环）
-- 🔲 下一步: P6 发布阶段（CI/CD + 安装包 + 文档）
+- ✅ 2026-03-21: P8 安全管控 + 屏幕能力（审计日志 + 截图 + VL模型 + Settings完善）
+- ✅ 2026-03-21: P9 交互操控 + 多会话 + UI 优化
+- ✅ 2026-03-21: P10 路由 + 定时监控
+- ✅ 2026-03-21: P11 安全加固 + 工具补齐（审批拦截 + 快照 + 目录选择 + 网页抓取 + TaskPanel）
+- 🔲 下一步: P6 发布（CI/CD + 安装包）

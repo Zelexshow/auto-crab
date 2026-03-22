@@ -10,7 +10,10 @@ pub struct ShellExecutor {
 
 impl ShellExecutor {
     pub fn new(enabled: bool, allowed_commands: Vec<String>) -> Self {
-        Self { enabled, allowed_commands }
+        Self {
+            enabled,
+            allowed_commands,
+        }
     }
 
     fn validate_command(&self, command: &str) -> Result<()> {
@@ -53,13 +56,10 @@ impl ShellExecutor {
             cmd.current_dir(dir);
         }
 
-        cmd.stdout(Stdio::piped())
-           .stderr(Stdio::piped());
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
-        let output = tokio::time::timeout(
-            std::time::Duration::from_secs(60),
-            cmd.output(),
-        ).await
+        let output = tokio::time::timeout(std::time::Duration::from_secs(60), cmd.output())
+            .await
             .map_err(|_| anyhow::anyhow!("Command timed out after 60 seconds"))??;
 
         Ok(ShellOutput {

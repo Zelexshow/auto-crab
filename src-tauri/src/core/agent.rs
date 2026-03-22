@@ -1,13 +1,13 @@
 use crate::config::AppConfig;
+use crate::core::context::ContextManager;
 use crate::models::provider::*;
 use crate::models::ModelRouter;
 use crate::security::approval::{ApprovalDecision, ApprovalGate, ApprovalResult};
 use crate::security::audit::{AuditLogger, AuditSource, AuditStatus};
 use crate::security::risk::RiskEngine;
 use crate::tools::file_ops::FileOps;
-use crate::tools::shell::ShellExecutor;
 use crate::tools::registry::ToolRegistry;
-use crate::core::context::ContextManager;
+use crate::tools::shell::ShellExecutor;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -45,13 +45,18 @@ impl Agent {
         let approval = Arc::new(ApprovalGate::new(risk_engine));
         let audit = Arc::new(AuditLogger::new(data_dir));
 
-        let file_roots: Vec<PathBuf> = config.tools.file_access.iter()
+        let file_roots: Vec<PathBuf> = config
+            .tools
+            .file_access
+            .iter()
             .map(|s| PathBuf::from(shellexpand::tilde(s).to_string()))
             .collect();
 
         Ok(Self {
             router,
-            context: Arc::new(Mutex::new(ContextManager::new(config.agent.max_context_tokens))),
+            context: Arc::new(Mutex::new(ContextManager::new(
+                config.agent.max_context_tokens,
+            ))),
             tools: ToolRegistry::new(),
             file_ops: FileOps::new(file_roots),
             shell: ShellExecutor::new(
@@ -87,7 +92,11 @@ impl Agent {
 
             let request = ChatRequest {
                 messages,
-                tools: if tool_defs.is_empty() { None } else { Some(self.tools.to_tool_definitions()) },
+                tools: if tool_defs.is_empty() {
+                    None
+                } else {
+                    Some(self.tools.to_tool_definitions())
+                },
                 temperature: 0.7,
                 max_tokens: None,
             };
@@ -144,21 +153,31 @@ impl Agent {
             .map(|s| s.operation_type.as_str())
             .unwrap_or("unknown");
 
-        let approval_result = self.approval.request(
-            operation_type,
-            &format!("{}({})", tc.name, &tc.arguments[..tc.arguments.len().min(100)]),
-            serde_json::json!({ "tool": tc.name, "args": tc.arguments }),
-        ).await;
+        let approval_result = self
+            .approval
+            .request(
+                operation_type,
+                &format!(
+                    "{}({})",
+                    tc.name,
+                    &tc.arguments[..tc.arguments.len().min(100)]
+                ),
+                serde_json::json!({ "tool": tc.name, "args": tc.arguments }),
+            )
+            .await;
 
         match approval_result {
             Err(e) => {
-                let _ = self.audit.log(
-                    operation_type,
-                    crate::config::RiskLevel::Forbidden,
-                    AuditStatus::Blocked,
-                    &format!("{}: {}", tc.name, e),
-                    AuditSource::Local,
-                ).await;
+                let _ = self
+                    .audit
+                    .log(
+                        operation_type,
+                        crate::config::RiskLevel::Forbidden,
+                        AuditStatus::Blocked,
+                        &format!("{}: {}", tc.name, e),
+                        AuditSource::Local,
+                    )
+                    .await;
 
                 ToolCallRecord {
                     tool_name: tc.name.clone(),
@@ -169,13 +188,16 @@ impl Agent {
             }
             Ok(ApprovalResult::AutoApproved) => {
                 let result = self.do_tool_execution(tc).await;
-                let _ = self.audit.log(
-                    operation_type,
-                    crate::config::RiskLevel::Safe,
-                    AuditStatus::AutoApproved,
-                    &tc.name,
-                    AuditSource::Local,
-                ).await;
+                let _ = self
+                    .audit
+                    .log(
+                        operation_type,
+                        crate::config::RiskLevel::Safe,
+                        AuditStatus::AutoApproved,
+                        &tc.name,
+                        AuditSource::Local,
+                    )
+                    .await;
 
                 ToolCallRecord {
                     tool_name: tc.name.clone(),
@@ -184,60 +206,62 @@ impl Agent {
                     approved: true,
                 }
             }
-            Ok(ApprovalResult::Pending { approval: _, receiver }) => {
-                match tokio::time::timeout(
-                    std::time::Duration::from_secs(300),
-                    receiver,
-                ).await {
-                    Ok(Ok(ApprovalDecision::Approved)) => {
-                        let result = self.do_tool_execution(tc).await;
-                        let _ = self.audit.log(
+            Ok(ApprovalResult::Pending {
+                approval: _,
+                receiver,
+            }) => match tokio::time::timeout(std::time::Duration::from_secs(300), receiver).await {
+                Ok(Ok(ApprovalDecision::Approved)) => {
+                    let result = self.do_tool_execution(tc).await;
+                    let _ = self
+                        .audit
+                        .log(
                             operation_type,
                             crate::config::RiskLevel::Moderate,
                             AuditStatus::Approved,
                             &tc.name,
                             AuditSource::Local,
-                        ).await;
+                        )
+                        .await;
 
-                        ToolCallRecord {
-                            tool_name: tc.name.clone(),
-                            arguments: tc.arguments.clone(),
-                            result,
-                            approved: true,
-                        }
+                    ToolCallRecord {
+                        tool_name: tc.name.clone(),
+                        arguments: tc.arguments.clone(),
+                        result,
+                        approved: true,
                     }
-                    Ok(Ok(ApprovalDecision::Rejected { reason })) => {
-                        let _ = self.audit.log(
+                }
+                Ok(Ok(ApprovalDecision::Rejected { reason })) => {
+                    let _ = self
+                        .audit
+                        .log(
                             operation_type,
                             crate::config::RiskLevel::Moderate,
                             AuditStatus::Rejected,
                             &format!("{}: {}", tc.name, reason),
                             AuditSource::Local,
-                        ).await;
+                        )
+                        .await;
 
-                        ToolCallRecord {
-                            tool_name: tc.name.clone(),
-                            arguments: tc.arguments.clone(),
-                            result: format!("操作被用户拒绝: {}", reason),
-                            approved: false,
-                        }
-                    }
-                    _ => {
-                        ToolCallRecord {
-                            tool_name: tc.name.clone(),
-                            arguments: tc.arguments.clone(),
-                            result: "操作审批超时（5分钟）".into(),
-                            approved: false,
-                        }
+                    ToolCallRecord {
+                        tool_name: tc.name.clone(),
+                        arguments: tc.arguments.clone(),
+                        result: format!("操作被用户拒绝: {}", reason),
+                        approved: false,
                     }
                 }
-            }
+                _ => ToolCallRecord {
+                    tool_name: tc.name.clone(),
+                    arguments: tc.arguments.clone(),
+                    result: "操作审批超时（5分钟）".into(),
+                    approved: false,
+                },
+            },
         }
     }
 
     async fn do_tool_execution(&self, tc: &ToolCall) -> String {
-        let args: serde_json::Value = serde_json::from_str(&tc.arguments)
-            .unwrap_or(serde_json::Value::Null);
+        let args: serde_json::Value =
+            serde_json::from_str(&tc.arguments).unwrap_or(serde_json::Value::Null);
 
         match tc.name.as_str() {
             "read_file" => {
@@ -245,7 +269,11 @@ impl Agent {
                 match self.file_ops.read_file(path).await {
                     Ok(content) => {
                         if content.len() > 10000 {
-                            format!("{}...\n[文件内容截断，共 {} 字符]", &content[..10000], content.len())
+                            format!(
+                                "{}...\n[文件内容截断，共 {} 字符]",
+                                &content[..10000],
+                                content.len()
+                            )
                         } else {
                             content
                         }
@@ -265,13 +293,16 @@ impl Agent {
                 let path = args["path"].as_str().unwrap_or(".");
                 match self.file_ops.list_directory(path).await {
                     Ok(entries) => {
-                        let lines: Vec<String> = entries.iter().map(|e| {
-                            if e.is_dir {
-                                format!("📁 {}/", e.name)
-                            } else {
-                                format!("📄 {} ({} bytes)", e.name, e.size)
-                            }
-                        }).collect();
+                        let lines: Vec<String> = entries
+                            .iter()
+                            .map(|e| {
+                                if e.is_dir {
+                                    format!("📁 {}/", e.name)
+                                } else {
+                                    format!("📄 {} ({} bytes)", e.name, e.size)
+                                }
+                            })
+                            .collect();
                         lines.join("\n")
                     }
                     Err(e) => format!("列目录失败: {}", e),
@@ -287,7 +318,9 @@ impl Agent {
                             result.push_str(&output.stdout);
                         }
                         if !output.stderr.is_empty() {
-                            if !result.is_empty() { result.push('\n'); }
+                            if !result.is_empty() {
+                                result.push('\n');
+                            }
                             result.push_str("[stderr] ");
                             result.push_str(&output.stderr);
                         }
