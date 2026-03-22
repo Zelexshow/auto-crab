@@ -177,6 +177,14 @@ fn tool_operation_type(name: &str) -> &str {
 fn is_readonly_shell_command(arguments: &str) -> bool {
     let args: serde_json::Value = serde_json::from_str(arguments).unwrap_or_default();
     let cmd = args["command"].as_str().unwrap_or("").trim().to_lowercase();
+
+    if cmd.contains('>') || cmd.contains(">>") || cmd.contains('|') || cmd.contains("rm ")
+        || cmd.contains("del ") || cmd.contains("move ") || cmd.contains("copy ")
+        || cmd.contains("mkdir ") || cmd.contains("rmdir ")
+    {
+        return false;
+    }
+
     let first = cmd.split_whitespace().next().unwrap_or("");
     matches!(first,
         "dir" | "ls" | "cat" | "type" | "where" | "which" | "whoami" |
@@ -718,7 +726,10 @@ pub async fn chat_stream_start(
 
     let provider = match router.get_primary() {
         Some(p) => p,
-        None => return ApiResult::err("No model provider configured"),
+        None => {
+            tracing::error!("[Desktop] No primary provider! Config models.primary: {:?}", cfg.models.primary.as_ref().map(|m| &m.provider));
+            return ApiResult::err("No model provider configured. 请检查模型配置和 API Key。");
+        }
     };
 
     let emitter = app;

@@ -19,8 +19,9 @@ impl ModelRouter {
 
         if let Some(ref entry) = config.models.primary {
             let key = format!("primary:{}", entry.provider);
-            if let Ok(provider) = Self::build_provider(entry) {
-                providers.insert(key, Arc::from(provider));
+            match Self::build_provider(entry) {
+                Ok(provider) => { providers.insert(key, Arc::from(provider)); }
+                Err(e) => { tracing::error!("Failed to build primary provider '{}': {}", entry.provider, e); }
             }
         }
 

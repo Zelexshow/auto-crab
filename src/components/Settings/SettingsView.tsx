@@ -15,6 +15,17 @@ const PROVIDERS = [
   { value: "ollama", label: "Ollama (本地)" },
 ];
 
+const PROVIDER_KEY_MAP: Record<string, string> = {
+  dashscope: "dashscope",
+  dashscope_vl: "dashscope",
+  deepseek: "deepseek",
+  zhipu: "zhipu",
+  moonshot: "moonshot",
+  openai: "openai",
+  anthropic: "anthropic",
+  ollama: "",
+};
+
 const MODEL_SUGGESTIONS: Record<string, { value: string; label: string }[]> = {
   dashscope: [
     { value: "qwen-max", label: "qwen-max (最强)" },
@@ -65,6 +76,8 @@ export function SettingsView() {
   const [fallbackEndpoint, setFallbackEndpoint] = useState("http://localhost:11434");
   const [codingProvider, setCodingProvider] = useState("");
   const [codingModel, setCodingModel] = useState("");
+  const [visionProvider, setVisionProvider] = useState("");
+  const [visionModel, setVisionModel] = useState("");
 
   const [shellEnabled, setShellEnabled] = useState(true);
   const [shellCommands, setShellCommands] = useState("git, npm, pnpm, python, cargo, node");
@@ -107,6 +120,10 @@ export function SettingsView() {
       if (cfg.models?.coding) {
         setCodingProvider(cfg.models.coding.provider ?? "");
         setCodingModel(cfg.models.coding.model ?? "");
+      }
+      if (cfg.models?.vision) {
+        setVisionProvider(cfg.models.vision.provider ?? "");
+        setVisionModel(cfg.models.vision.model ?? "");
       }
       if (cfg.tools) {
         setShellEnabled(cfg.tools.shell_enabled ?? true);
@@ -157,9 +174,10 @@ export function SettingsView() {
         models: {
           ...(base.models || {}),
           routing: base.models?.routing ?? {},
-          primary: primaryProvider ? { provider: primaryProvider, model: primaryModel, api_key_ref: `keychain://${primaryProvider}` } : base.models?.primary ?? null,
+          primary: primaryProvider ? { provider: primaryProvider, model: primaryModel, api_key_ref: `keychain://${PROVIDER_KEY_MAP[primaryProvider] || primaryProvider}` } : base.models?.primary ?? null,
           fallback: fallbackProvider ? { provider: fallbackProvider, model: fallbackModel, ...(fallbackProvider === "ollama" ? { endpoint: fallbackEndpoint } : {}), api_key_ref: fallbackProvider !== "ollama" ? `keychain://${fallbackProvider}` : undefined } : base.models?.fallback ?? null,
-          coding: codingProvider ? { provider: codingProvider, model: codingModel, api_key_ref: `keychain://${codingProvider}` } : base.models?.coding ?? null,
+          coding: codingProvider ? { provider: codingProvider, model: codingModel, api_key_ref: `keychain://${PROVIDER_KEY_MAP[codingProvider] || codingProvider}` } : base.models?.coding ?? null,
+          vision: visionProvider ? { provider: visionProvider, model: visionModel, api_key_ref: `keychain://${PROVIDER_KEY_MAP[visionProvider] || visionProvider}` } : base.models?.vision ?? null,
         },
         agent: base.agent ?? { name: "小蟹", personality: "professional", max_context_tokens: 128000, system_prompt: "" },
         security: { ...(base.security || {}), auto_lock_minutes: parseInt(autoLockMin) || 15 },
@@ -301,7 +319,23 @@ export function SettingsView() {
                 )}
               </Card>
 
-              <Card title="编码模型" desc="代码生成和分析专用">
+              <Card title="视觉模型" desc="截图分析、K线识别、图像理解（需要多模态模型）">
+                <Row label="提供商">
+                  <Select value={visionProvider} onChange={(v) => { setVisionProvider(v); setVisionModel(MODEL_SUGGESTIONS[v]?.[0]?.value ?? ""); }} options={PROVIDERS} />
+                </Row>
+                <Row label="模型名">
+                  {MODEL_SUGGESTIONS[visionProvider] ? (
+                    <Select value={visionModel} onChange={setVisionModel} options={MODEL_SUGGESTIONS[visionProvider]} />
+                  ) : (
+                    <Input value={visionModel} onChange={setVisionModel} placeholder="qwen3-vl-plus" />
+                  )}
+                </Row>
+                <Row label="API Key">
+                  <KeyStatus provider={visionProvider} statuses={credentialStatuses} />
+                </Row>
+              </Card>
+
+              <Card title="编码模型" desc="代码生成和分析专用（可选）">
                 <Row label="提供商">
                   <Select value={codingProvider} onChange={setCodingProvider} options={PROVIDERS} />
                 </Row>
@@ -391,9 +425,14 @@ export function SettingsView() {
                     </div>
                     <button
                       onClick={async () => {
-                        const dir = await dialogOpen({ directory: true, multiple: false, title: "选择允许访问的目录" });
-                        if (dir && typeof dir === "string") {
-                          setFileAccess((prev) => prev ? `${prev}, ${dir}` : dir);
+                        const dirs = await dialogOpen({ directory: true, multiple: true, title: "选择允许访问的目录（可多选）" });
+                        if (dirs) {
+                          const selected = Array.isArray(dirs) ? dirs : [dirs];
+                          setFileAccess((prev) => {
+                            const existing = prev ? prev.split(",").map((s: string) => s.trim()).filter(Boolean) : [];
+                            const merged = [...new Set([...existing, ...selected])];
+                            return merged.join(", ");
+                          });
                         }
                       }}
                       className="shrink-0 px-3 py-1.5 rounded-md text-xs flex items-center gap-1"
@@ -542,7 +581,11 @@ export function SettingsView() {
               <Card title="已保存的密钥" desc="系统密钥链中当前存在的凭据">
                 <div className="space-y-1.5">
                   {["dashscope", "deepseek", "zhipu", "moonshot", "openai", "anthropic", "feishu-secret", "wechat-work-secret"].map((k) => (
-                    <CredentialRow key={k} name={k} exists={credentialStatuses[k]} onEdit={(name) => { setKeyName(name); }} />
+                    <CredentialRow key={k} name={k} exists={credentialStatuses[k]} onEdit={(name, currentPreview) => {
+                      setKeyName(name);
+                      setApiKeyInput("");
+                      setSaveMsg(currentPreview ? `当前值: ${currentPreview}（输入新值将覆盖）` : "");
+                    }} />
                   ))}
                 </div>
               </Card>
@@ -595,25 +638,27 @@ export function SettingsView() {
 
 function KeyStatus({ provider, statuses }: { provider: string; statuses: Record<string, boolean> }) {
   const [preview, setPreview] = useState("");
+  const keyName = PROVIDER_KEY_MAP[provider] ?? provider;
+
   useEffect(() => {
-    if (provider && statuses[provider]) {
-      invoke<{ success: boolean; data?: string }>("get_credential_preview", { key: provider }).then((res) => {
+    if (keyName && statuses[keyName]) {
+      invoke<{ success: boolean; data?: string }>("get_credential_preview", { key: keyName }).then((res) => {
         setPreview(res.data ?? "");
       }).catch(() => {});
     } else {
       setPreview("");
     }
-  }, [provider, statuses]);
+  }, [keyName, statuses]);
 
-  if (!provider) return null;
-  const exists = statuses[provider];
+  if (!provider || provider === "ollama") return <span className="text-xs" style={{ color: "var(--text-muted)" }}>本地模型，无需 API Key</span>;
+  const exists = statuses[keyName];
   return (
     <div className="flex items-center gap-2">
       <span className="inline-block w-2 h-2 rounded-full" style={{ background: exists ? "var(--success)" : "var(--danger)" }} />
       <span className="text-xs" style={{ color: "var(--text-muted)" }}>
         {exists
-          ? `已配置 ${preview ? `(${preview})` : ""} — keychain://${provider}`
-          : `未配置，请在「密钥管理」中保存 keychain://${provider}`}
+          ? `已配置 ${preview ? `(${preview})` : ""} — keychain://${keyName}`
+          : `未配置，请在「密钥管理」中保存 keychain://${keyName}`}
       </span>
     </div>
   );
@@ -621,7 +666,7 @@ function KeyStatus({ provider, statuses }: { provider: string; statuses: Record<
 
 /* ================= CredentialRow Component ================= */
 
-function CredentialRow({ name, exists, onEdit }: { name: string; exists: boolean; onEdit: (name: string) => void }) {
+function CredentialRow({ name, exists, onEdit }: { name: string; exists: boolean; onEdit: (name: string, currentPreview: string) => void }) {
   const [preview, setPreview] = useState("");
   useEffect(() => {
     if (exists) {
@@ -645,7 +690,7 @@ function CredentialRow({ name, exists, onEdit }: { name: string; exists: boolean
           <span style={{ color: "var(--text-muted)" }}>未配置</span>
         )}
         <button
-          onClick={() => onEdit(name)}
+          onClick={() => onEdit(name, preview)}
           className="px-2 py-0.5 rounded text-[11px] transition-colors"
           style={{ background: "var(--bg-tertiary)", color: "var(--text-secondary)" }}
         >
