@@ -84,6 +84,8 @@ pub struct AgentConfig {
     pub max_context_tokens: usize,
     #[serde(default = "default_system_prompt")]
     pub system_prompt: String,
+    #[serde(default)]
+    pub long_term_memory: bool,
 }
 
 impl Default for AgentConfig {
@@ -93,6 +95,7 @@ impl Default for AgentConfig {
             personality: default_personality(),
             max_context_tokens: default_max_context(),
             system_prompt: default_system_prompt(),
+            long_term_memory: false,
         }
     }
 }
@@ -200,6 +203,10 @@ pub struct WechatWorkConfig {
     pub corp_id: String,
     pub agent_id: String,
     pub secret_ref: String,
+    #[serde(default)]
+    pub token: String,
+    #[serde(default)]
+    pub encoding_aes_key: String,
     #[serde(default = "default_poll_interval")]
     pub poll_interval_secs: u64,
     #[serde(default)]
@@ -252,19 +259,17 @@ fn default_max_context() -> usize {
 }
 fn default_system_prompt() -> String {
     let os_info = if cfg!(target_os = "windows") {
-        "当前操作系统是 Windows。桌面路径示例：C:\\Users\\用户名\\Desktop。\
-文件路径使用反斜杠或正斜杠均可。可用 ~ 表示用户主目录。\
-Shell 命令使用 cmd /C 执行。"
+        "系统: Windows。Shell: cmd /C。路径可用 ~ 或反斜杠。"
     } else if cfg!(target_os = "macos") {
-        "当前操作系统是 macOS。桌面路径示例：~/Desktop。"
+        "系统: macOS。Shell: sh -c。"
     } else {
-        "当前操作系统是 Linux。桌面路径示例：~/Desktop。"
+        "系统: Linux。Shell: sh -c。"
     };
     format!(
-        "你是 Auto Crab（小蟹），一个安全、可控的桌面 AI 助理。\
-你有能力使用工具来直接操作用户的电脑，包括读写文件(read_file/write_file/list_directory)、执行命令(execute_shell)等。\
-当用户要求你执行操作时，你必须调用提供的工具函数来完成，不要只用文字描述步骤。\
-{}\
+        "你是 Auto Crab（小蟹），一个桌面AI助理。{}\n\n\
+你有工具可用（文件操作、命令执行、截图分析、屏幕操控、网页抓取），\
+但只在用户明确要求操作时才调用。普通聊天、问答、闲聊不需要使用任何工具。\n\
+当用户要求执行操作时，直接调用工具完成，不要只描述步骤。\n\
 请用中文回复。",
         os_info
     )

@@ -1,14 +1,14 @@
 use crate::config::AppConfig;
 use crate::remote::feishu::FeishuBot;
 use crate::remote::protocol::CommandType;
+use crate::remote::wechat_work::WechatWorkBot;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 
-/// Minimal HTTP server to receive Feishu/WeChat webhook events.
-/// Runs on a local port, meant to be exposed via tunnel (ngrok/cloudflare).
 pub struct WebhookServer {
     port: u16,
     feishu: Option<Arc<Mutex<FeishuBot>>>,
+    wechat_work: Option<Arc<Mutex<WechatWorkBot>>>,
     command_tx: mpsc::Sender<WebhookCommand>,
 }
 
@@ -28,15 +28,20 @@ impl WebhookServer {
             .as_ref()
             .map(|c| Arc::new(Mutex::new(FeishuBot::new(c.clone()))));
 
+        let wechat_work = config
+            .remote
+            .wechat_work
+            .as_ref()
+            .map(|c| Arc::new(Mutex::new(WechatWorkBot::new(c.clone()))));
+
         Self {
             port: 18790,
             feishu,
+            wechat_work,
             command_tx,
         }
     }
 
-    /// Start the webhook HTTP server.
-    /// This spawns a background task that listens for incoming webhooks.
     pub async fn start(&self) -> anyhow::Result<()> {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::TcpListener;
@@ -46,6 +51,7 @@ impl WebhookServer {
         tracing::info!("Webhook server listening on {}", addr);
 
         let feishu = self.feishu.clone();
+        let wechat_work = self.wechat_work.clone();
         let tx = self.command_tx.clone();
 
         tokio::spawn(async move {
@@ -53,6 +59,7 @@ impl WebhookServer {
                 match listener.accept().await {
                     Ok((mut stream, _)) => {
                         let feishu = feishu.clone();
+                        let wechat_work = wechat_work.clone();
                         let tx = tx.clone();
 
                         tokio::spawn(async move {
@@ -60,7 +67,7 @@ impl WebhookServer {
                             let n = stream.read(&mut buf).await.unwrap_or(0);
                             let request = String::from_utf8_lossy(&buf[..n]).to_string();
 
-                            let response = handle_request(&request, &feishu, &tx).await;
+                            let response = handle_request(&request, &feishu, &wechat_work, &tx).await;
 
                             let http_response = format!(
                                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
@@ -81,7 +88,46 @@ impl WebhookServer {
     }
 }
 
+fn parse_request_line(raw: &str) -> (&str, &str) {
+    let first_line = raw.lines().next().unwrap_or("");
+    let mut parts = first_line.split_whitespace();
+    let method = parts.next().unwrap_or("POST");
+    let path = parts.next().unwrap_or("/");
+    (method, path)
+}
+
+fn parse_query_param<'a>(path: &'a str, key: &str) -> Option<&'a str> {
+    let query = path.split('?').nth(1)?;
+    for pair in query.split('&') {
+        let mut kv = pair.splitn(2, '=');
+        if kv.next() == Some(key) {
+            return kv.next();
+        }
+    }
+    None
+}
+
 async fn handle_request(
+    raw: &str,
+    feishu: &Option<Arc<Mutex<FeishuBot>>>,
+    wechat_work: &Option<Arc<Mutex<WechatWorkBot>>>,
+    tx: &mpsc::Sender<WebhookCommand>,
+) -> String {
+    let (method, path) = parse_request_line(raw);
+    let base_path = path.split('?').next().unwrap_or(path);
+
+    match base_path {
+        "/webhook/wechat_work" | "/webhook/wechat" => {
+            handle_wechat_work(raw, method, path, wechat_work, tx).await
+        }
+        _ => {
+            // Default: Feishu webhook (backward compatible)
+            handle_feishu(raw, feishu, tx).await
+        }
+    }
+}
+
+async fn handle_feishu(
     raw: &str,
     feishu: &Option<Arc<Mutex<FeishuBot>>>,
     tx: &mpsc::Sender<WebhookCommand>,
@@ -125,4 +171,73 @@ async fn handle_request(
     }
 
     r#"{"ok":true}"#.to_string()
+}
+
+async fn handle_wechat_work(
+    raw: &str,
+    method: &str,
+    path: &str,
+    wechat_work: &Option<Arc<Mutex<WechatWorkBot>>>,
+    tx: &mpsc::Sender<WebhookCommand>,
+) -> String {
+    let bot = match wechat_work {
+        Some(b) => b,
+        None => {
+            tracing::warn!("WeChat Work webhook received but not configured");
+            return r#"{"error":"wechat_work not configured"}"#.to_string();
+        }
+    };
+
+    let msg_signature = parse_query_param(path, "msg_signature").unwrap_or("");
+    let timestamp = parse_query_param(path, "timestamp").unwrap_or("");
+    let nonce = parse_query_param(path, "nonce").unwrap_or("");
+
+    // GET = URL verification
+    if method == "GET" {
+        let echostr = parse_query_param(path, "echostr").unwrap_or("");
+        if echostr.is_empty() {
+            return r#"{"error":"missing echostr"}"#.to_string();
+        }
+
+        let bot = bot.lock().await;
+        match bot.verify_url(msg_signature, timestamp, nonce, echostr) {
+            Some(reply) => {
+                tracing::info!("WeChat Work URL verification successful");
+                reply
+            }
+            None => {
+                tracing::warn!("WeChat Work URL verification failed");
+                r#"{"error":"verification failed"}"#.to_string()
+            }
+        }
+    }
+    // POST = message callback
+    else {
+        let body = raw.split("\r\n\r\n").nth(1).unwrap_or("");
+        if body.is_empty() {
+            return "success".to_string();
+        }
+
+        let bot = bot.lock().await;
+        if let Some(cmd) = bot.parse_callback(body, msg_signature, timestamp, nonce) {
+            let _ = tx
+                .send(WebhookCommand {
+                    source: "wechat_work".into(),
+                    user_id: cmd.user_id,
+                    command_type: match cmd.command_type {
+                        CommandType::Chat => "chat".into(),
+                        CommandType::StatusQuery => "status".into(),
+                        CommandType::TaskCreate => "task_create".into(),
+                        CommandType::TaskCancel => "task_cancel".into(),
+                        CommandType::ApproveAction => "approve".into(),
+                        CommandType::RejectAction => "reject".into(),
+                    },
+                    text: cmd.content,
+                })
+                .await;
+            tracing::info!("WeChat Work command received: {:?}", cmd.command_type);
+        }
+
+        "success".to_string()
+    }
 }

@@ -19,6 +19,10 @@ static DESKTOP_APPROVALS: std::sync::LazyLock<
     Mutex<HashMap<String, tokio::sync::oneshot::Sender<bool>>>,
 > = std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
+pub fn desktop_approvals() -> &'static Mutex<HashMap<String, tokio::sync::oneshot::Sender<bool>>> {
+    &DESKTOP_APPROVALS
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PendingApproval {
     pub id: String,
@@ -155,23 +159,50 @@ pub struct HistoryMessage {
     pub content: String,
 }
 
+/// Determine if the user message likely needs tool execution.
+pub fn should_use_tools(message: &str) -> bool {
+    let msg = message.to_lowercase();
+    let len = msg.chars().count();
+
+    if len <= 5 && !msg.contains("看") && !msg.contains("删") && !msg.contains("建") {
+        return false;
+    }
+
+    let action_keywords = [
+        "帮我", "帮忙", "请你", "创建", "新建", "删除", "打开", "运行", "执行",
+        "文件", "目录", "文件夹", "桌面", "截图", "截屏", "屏幕", "看看",
+        "列出", "查看", "读取", "写入", "保存", "修改", "编辑",
+        "安装", "下载", "搜索", "抓取", "网页", "网站",
+        "点击", "输入", "按键", "微信", "飞书",
+        "监控", "盯盘", "分析",
+        "cmd", "shell", "pip", "npm", "git",
+        "c:\\", "c:/", "~/", "/users",
+    ];
+
+    action_keywords.iter().any(|kw| msg.contains(kw))
+}
+
 /// Build tool definitions from the tool registry.
 pub fn build_tool_definitions() -> Vec<ToolDefinition> {
     ToolRegistry::new().to_tool_definitions()
 }
 
 /// Map tool name to the operation type used by the risk engine.
-fn tool_operation_type(name: &str) -> &str {
+pub fn tool_operation_type(name: &str) -> &str {
     match name {
-        "read_file" | "list_directory" | "fetch_webpage" => "read_file",
+        "read_file" | "list_directory" | "fetch_webpage" | "read_pdf" => "read_file",
+        "search_web" | "get_crypto_price" => "search_web",
+        "screenshot" | "analyze_screen" | "get_ui_tree" => "read_file",
+        "focus_window" => "write_file",
         "write_file" => "write_file",
-        "execute_shell" => "execute_shell",
-        "delete_file" => "delete_file",
-        "screenshot" | "analyze_screen" => "read_file",
+        "execute_shell" | "analyze_and_act" | "quick_reply_wechat" => "execute_shell",
         "mouse_click" | "keyboard_type" | "key_press" => "execute_shell",
+        "delete_file" => "delete_file",
         _ => "unknown",
     }
 }
+
+pub fn is_readonly_shell_command_pub(arguments: &str) -> bool { is_readonly_shell_command(arguments) }
 
 /// Check if a shell command is read-only (safe to auto-approve).
 fn is_readonly_shell_command(arguments: &str) -> bool {
@@ -341,6 +372,13 @@ pub async fn dispatch_tool(tc: &ToolCall, file_ops: &FileOps, shell: &ShellExecu
                 Err(e) => format!("key_press 失败: {}", e),
             }
         }
+        "search_web" => {
+            let query = args["query"].as_str().unwrap_or("");
+            match search_web(query).await {
+                Ok(results) => results,
+                Err(e) => format!("search_web 失败: {}。可尝试 fetch_webpage 直接访问目标网站", e),
+            }
+        }
         "fetch_webpage" => {
             let url = args["url"].as_str().unwrap_or("");
             match fetch_webpage_text(url).await {
@@ -372,6 +410,65 @@ pub async fn dispatch_tool(tc: &ToolCall, file_ops: &FileOps, shell: &ShellExecu
                 Ok(path) => format!("截图已保存: {}", path),
                 Err(e) => format!("截图失败: {}", e),
             }
+        }
+        "read_pdf" => {
+            let path = args["path"].as_str().unwrap_or("");
+            let max_pages = args["max_pages"].as_u64().unwrap_or(20) as usize;
+            match read_pdf_text(path, max_pages).await {
+                Ok(text) => {
+                    let preview: String = text.chars().take(15000).collect();
+                    if text.len() > 15000 {
+                        format!("{}...\n\n[PDF内容已截断，共 {} 字符。如需完整内容，请减少页数或分批读取]", preview, text.len())
+                    } else {
+                        preview
+                    }
+                }
+                Err(e) => format!("PDF读取失败: {}", e),
+            }
+        }
+        "get_crypto_price" => {
+            let symbol = args["symbol"].as_str().unwrap_or("BTCUSDT").to_uppercase();
+            match fetch_crypto_price(&symbol).await {
+                Ok(info) => info,
+                Err(e) => format!("获取价格失败: {}", e),
+            }
+        }
+        "quick_reply_wechat" => {
+            let contact = args["contact"].as_str().unwrap_or("");
+            let message = args["message"].as_str().unwrap_or("");
+            format!("__WECHAT_REPLY__:{}::{}", contact, message)
+        }
+        "get_ui_tree" => {
+            let max_depth = args["max_depth"].as_u64().unwrap_or(8) as u32;
+            match tokio::task::spawn_blocking(move || {
+                crate::tools::ui_automation::get_foreground_ui_tree(max_depth)
+            }).await {
+                Ok(Ok(snapshot)) => {
+                    if snapshot.has_useful_elements() {
+                        snapshot.serialize_text()
+                    } else {
+                        format!("窗口 '{}' 的控件树信息不足（可能是 Canvas/自绘UI），建议使用 analyze_screen 替代", snapshot.window_title)
+                    }
+                }
+                Ok(Err(e)) => format!("get_ui_tree 失败: {}", e),
+                Err(e) => format!("get_ui_tree 执行错误: {}", e),
+            }
+        }
+        "focus_window" => {
+            let title = args["title"].as_str().unwrap_or("");
+            let t = title.to_string();
+            match tokio::task::spawn_blocking(move || {
+                crate::tools::ui_automation::focus_window_by_title(&t)
+            }).await {
+                Ok(Ok(msg)) => msg,
+                Ok(Err(e)) => format!("focus_window 失败: {}", e),
+                Err(e) => format!("focus_window 执行错误: {}", e),
+            }
+        }
+        "analyze_and_act" => {
+            let task = args["task"].as_str().unwrap_or("");
+            let max_steps = args["max_steps"].as_u64().unwrap_or(3) as usize;
+            format!("__ANALYZE_AND_ACT__:{}::{}", max_steps, task)
         }
         "analyze_screen" => {
             let data_dir = std::env::var("USERPROFILE")
@@ -518,6 +615,10 @@ pub async fn analyze_screenshot_with_prompt(
     anyhow::bail!("VL 分析失败（重试3次）: {}", last_err)
 }
 
+pub async fn do_mouse_click_pub(x: i32, y: i32, ct: &str) -> anyhow::Result<String> { do_mouse_click(x, y, ct).await }
+pub async fn do_keyboard_type_pub(text: &str) -> anyhow::Result<String> { do_keyboard_type(text).await }
+pub async fn do_key_press_pub(key: &str) -> anyhow::Result<String> { do_key_press(key).await }
+
 async fn do_mouse_click(x: i32, y: i32, click_type: &str) -> anyhow::Result<String> {
     let ct = click_type.to_string();
     tokio::task::spawn_blocking(move || {
@@ -635,6 +736,156 @@ async fn do_key_press(key_str: &str) -> anyhow::Result<String> {
     .await?
 }
 
+async fn search_web(query: &str) -> anyhow::Result<String> {
+    // Try Bing first (accessible in China), then fallback to DuckDuckGo
+    match search_bing(query).await {
+        Ok(results) if !results.is_empty() => {
+            return Ok(format!("搜索 \"{}\" 的结果:\n\n{}", query, results));
+        }
+        Err(e) => tracing::warn!("Bing search failed: {}, trying DuckDuckGo", e),
+        _ => tracing::warn!("Bing returned no results, trying DuckDuckGo"),
+    }
+
+    match search_duckduckgo(query).await {
+        Ok(results) if !results.is_empty() => {
+            Ok(format!("搜索 \"{}\" 的结果:\n\n{}", query, results))
+        }
+        Ok(_) => anyhow::bail!("未找到搜索结果"),
+        Err(e) => anyhow::bail!("搜索失败: {}", e),
+    }
+}
+
+async fn search_bing(query: &str) -> anyhow::Result<String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+        .build()?;
+
+    let url = format!("https://cn.bing.com/search?q={}&ensearch=0", urlencoding::encode(query));
+    let resp = client.get(&url).send().await?;
+    let html = resp.text().await?;
+
+    let mut results = Vec::new();
+    let mut pos = 0;
+
+    for _ in 0..8 {
+        // Bing results: <li class="b_algo"><h2><a href="...">title</a></h2><p>snippet</p></li>
+        let algo_marker = if let Some(idx) = html[pos..].find("class=\"b_algo\"") {
+            pos + idx
+        } else {
+            break;
+        };
+
+        let block_end = html[algo_marker..].find("class=\"b_algo\"")
+            .map(|i| if i == 0 {
+                html[algo_marker + 14..].find("class=\"b_algo\"").map(|j| algo_marker + 14 + j).unwrap_or(html.len())
+            } else { algo_marker + i })
+            .unwrap_or(html.len().min(algo_marker + 3000));
+        let block = &html[algo_marker..block_end];
+
+        let link_url = extract_attr(block, "<a", "href");
+        let title = extract_tag_content(block, "<a");
+        let snippet = extract_tag_content(block, "<p")
+            .or_else(|| extract_class_content(block, "b_caption"));
+
+        if let (Some(ref u), Some(ref t)) = (&link_url, &title) {
+            if !u.starts_with("/") && !t.is_empty() {
+                let clean_title = strip_html_tags(t);
+                let clean_snippet = snippet.map(|s| strip_html_tags(&s)).unwrap_or_default();
+                results.push(format!("{}. {}\n   {}\n   {}",
+                    results.len() + 1, clean_title.trim(), clean_snippet.trim(), u));
+            }
+        }
+        pos = block_end;
+    }
+
+    if results.is_empty() {
+        anyhow::bail!("Bing 未返回结果")
+    }
+    Ok(results.join("\n\n"))
+}
+
+fn extract_attr(html: &str, tag: &str, attr: &str) -> Option<String> {
+    let tag_start = html.find(tag)?;
+    let attr_needle = format!("{}=\"", attr);
+    let attr_start = html[tag_start..].find(&attr_needle)?;
+    let val_start = tag_start + attr_start + attr_needle.len();
+    let val_end = html[val_start..].find('"')?;
+    let val = html[val_start..val_start + val_end].replace("&amp;", "&");
+    Some(val)
+}
+
+fn extract_tag_content(html: &str, tag: &str) -> Option<String> {
+    let tag_start = html.find(tag)?;
+    let content_start = html[tag_start..].find('>')? + tag_start + 1;
+    let close_tag = format!("</{}", &tag[1..]);
+    let content_end = html[content_start..].find(&close_tag)
+        .map(|i| content_start + i)
+        .unwrap_or_else(|| html[content_start..].find("</").map(|i| content_start + i).unwrap_or(content_start + 200));
+    Some(html[content_start..content_end].to_string())
+}
+
+fn extract_class_content(html: &str, class: &str) -> Option<String> {
+    let marker = format!("class=\"{}\"", class);
+    let start = html.find(&marker)?;
+    let content_start = html[start..].find('>')? + start + 1;
+    let content_end = html[content_start..].find("</div")
+        .or_else(|| html[content_start..].find("</p"))
+        .map(|i| content_start + i)
+        .unwrap_or(content_start + 500);
+    Some(html[content_start..content_end].to_string())
+}
+
+async fn search_duckduckgo(query: &str) -> anyhow::Result<String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+        .build()?;
+
+    let url = format!("https://html.duckduckgo.com/html/?q={}", urlencoding::encode(query));
+    let resp = client.get(&url).send().await?;
+    let html = resp.text().await?;
+
+    let mut results = Vec::new();
+    let mut pos = 0;
+
+    for _ in 0..8 {
+        if let Some(start) = html[pos..].find("class=\"result__a\"") {
+            let abs = pos + start;
+            if let Some(href_start) = html[abs..].find("href=\"") {
+                let href_abs = abs + href_start + 6;
+                if let Some(href_end) = html[href_abs..].find('"') {
+                    let url = &html[href_abs..href_abs + href_end];
+                    let url = url.replace("&amp;", "&");
+
+                    let title_start = html[href_abs + href_end..].find('>').map(|i| href_abs + href_end + i + 1).unwrap_or(0);
+                    let title_end = html[title_start..].find('<').map(|i| title_start + i).unwrap_or(title_start);
+                    let title = strip_html_tags(&html[title_start..title_end]).trim().to_string();
+
+                    let snippet = if let Some(snip_start) = html[title_end..].find("class=\"result__snippet\"") {
+                        let sa = title_end + snip_start;
+                        if let Some(gt) = html[sa..].find('>') {
+                            let content_start = sa + gt + 1;
+                            let content_end = html[content_start..].find("</").map(|i| content_start + i).unwrap_or(content_start + 200);
+                            strip_html_tags(&html[content_start..content_end]).trim().to_string()
+                        } else { String::new() }
+                    } else { String::new() };
+
+                    if !title.is_empty() && !url.starts_with("/") {
+                        results.push(format!("{}. {}\n   {}\n   {}", results.len() + 1, title, snippet, url));
+                    }
+                    pos = title_end;
+                } else { break; }
+            } else { break; }
+        } else { break; }
+    }
+
+    if results.is_empty() {
+        anyhow::bail!("DuckDuckGo 未返回结果")
+    }
+    Ok(results.join("\n\n"))
+}
+
 async fn fetch_webpage_text(url: &str) -> anyhow::Result<String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
@@ -694,6 +945,240 @@ fn strip_html_tags(html: &str) -> String {
     final_text.trim().to_string()
 }
 
+/// Execute a vision-driven action loop: screenshot → VL analyze → execute actions → repeat
+pub async fn execute_analyze_and_act(
+    cfg: &config::AppConfig,
+    task: &str,
+    max_steps: usize,
+) -> String {
+    let tmp_dir = std::env::var("USERPROFILE").unwrap_or_else(|_| ".".into());
+    let mut results = Vec::new();
+
+    for step in 0..max_steps {
+        let tmp_path = format!("{}\\AppData\\Local\\Temp\\auto-crab-act-{}.png", tmp_dir, step);
+
+        let screenshot_ok = match take_screenshot(&tmp_path).await {
+            Ok(_) => true,
+            Err(e) => { results.push(format!("步骤{}: 截图失败: {}", step + 1, e)); false }
+        };
+        if !screenshot_ok { break; }
+
+        let vl_prompt = format!(
+r#"你是桌面操作助理。分析截图，在目标应用窗口中执行操作。
+用户任务：{}
+屏幕分辨率：2560x1440（截图已缩小，请按原始分辨率换算坐标）
+
+重要规则：
+- 只检查目标应用窗口的实际状态，忽略聊天窗口/终端中的文字
+- 如果目标应用窗口中看不到任务要求的结果（如输入框为空），则任务未完成
+- task_status=completed 仅当你在目标应用中确认操作已生效时才返回
+
+输出 JSON（只输出JSON）：
+{{"screen_description":"目标应用窗口状态","task_status":"need_action 或 completed 或 impossible","actions":[{{"type":"click 或 type 或 key_press","x":数字,"y":数字,"text":"字符串","key":"字符串","reason":"原因"}}]}}
+
+click需要x,y; type需要text; key_press需要key。任务真正完成时actions返回空数组。"#,
+            task
+        );
+
+        match analyze_screenshot_with_prompt(cfg, &tmp_path, &vl_prompt).await {
+            Ok(vl_response) => {
+                let parsed = parse_vl_actions(&vl_response);
+                match parsed {
+                    VlActionResult::Completed(desc) => {
+                        results.push(format!("任务完成: {}", desc));
+                        break;
+                    }
+                    VlActionResult::Impossible(desc) => {
+                        results.push(format!("无法完成: {}", desc));
+                        break;
+                    }
+                    VlActionResult::Actions(desc, actions) => {
+                        results.push(format!("步骤{}: {} ({}个操作)", step + 1, desc, actions.len()));
+                        for action in &actions {
+                            match action.action_type.as_str() {
+                                "click" => {
+                                    if let Err(e) = do_mouse_click(action.x, action.y, "left").await {
+                                        results.push(format!("  点击({},{})失败: {}", action.x, action.y, e));
+                                    } else {
+                                        results.push(format!("  已点击({},{}): {}", action.x, action.y, action.reason));
+                                    }
+                                }
+                                "type" => {
+                                    if let Err(e) = do_keyboard_type(&action.text).await {
+                                        results.push(format!("  输入失败: {}", e));
+                                    } else {
+                                        let preview: String = action.text.chars().take(20).collect();
+                                        results.push(format!("  已输入: {}", preview));
+                                    }
+                                }
+                                "key_press" => {
+                                    if let Err(e) = do_key_press(&action.key).await {
+                                        results.push(format!("  按键失败: {}", e));
+                                    } else {
+                                        results.push(format!("  已按键: {}", action.key));
+                                    }
+                                }
+                                _ => results.push(format!("  未知操作: {}", action.action_type)),
+                            }
+                            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                        }
+                    }
+                    VlActionResult::ParseError(raw) => {
+                        results.push(format!("步骤{}: VL返回无法解析，原始内容: {}", step + 1, raw.chars().take(200).collect::<String>()));
+                        break;
+                    }
+                }
+            }
+            Err(e) => {
+                results.push(format!("步骤{}: VL分析失败: {}", step + 1, e));
+                break;
+            }
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+    }
+
+    results.join("\n")
+}
+
+#[derive(Debug)]
+struct VlAction {
+    action_type: String,
+    x: i32,
+    y: i32,
+    text: String,
+    key: String,
+    reason: String,
+}
+
+enum VlActionResult {
+    Completed(String),
+    Impossible(String),
+    Actions(String, Vec<VlAction>),
+    ParseError(String),
+}
+
+fn parse_vl_actions(response: &str) -> VlActionResult {
+    let json_str = response.trim();
+    let json_str = if let Some(start) = json_str.find('{') {
+        if let Some(end) = json_str.rfind('}') {
+            &json_str[start..=end]
+        } else { json_str }
+    } else { json_str };
+
+    let parsed: serde_json::Value = match serde_json::from_str(json_str) {
+        Ok(v) => v,
+        Err(_) => return VlActionResult::ParseError(response.to_string()),
+    };
+
+    let desc = parsed["screen_description"].as_str().unwrap_or("").to_string();
+    let status = parsed["task_status"].as_str().unwrap_or("need_action");
+
+    match status {
+        "completed" => VlActionResult::Completed(desc),
+        "impossible" => VlActionResult::Impossible(desc),
+        _ => {
+            let actions_arr = parsed["actions"].as_array();
+            let actions: Vec<VlAction> = actions_arr.map(|arr| {
+                arr.iter().map(|a| VlAction {
+                    action_type: a["type"].as_str().unwrap_or("").to_string(),
+                    x: a["x"].as_i64().unwrap_or(0) as i32,
+                    y: a["y"].as_i64().unwrap_or(0) as i32,
+                    text: a["text"].as_str().unwrap_or("").to_string(),
+                    key: a["key"].as_str().unwrap_or("").to_string(),
+                    reason: a["reason"].as_str().unwrap_or("").to_string(),
+                }).collect()
+            }).unwrap_or_default();
+
+            if actions.is_empty() {
+                VlActionResult::Completed(desc)
+            } else {
+                VlActionResult::Actions(desc, actions)
+            }
+        }
+    }
+}
+
+async fn read_pdf_text(path: &str, _max_pages: usize) -> anyhow::Result<String> {
+    let expanded = crate::tools::file_ops::FileOps::expand_path(path);
+    if !expanded.exists() {
+        anyhow::bail!("文件不存在: {}", expanded.display());
+    }
+
+    let path_clone = expanded.clone();
+    let text = tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
+        let bytes = std::fs::read(&path_clone)?;
+        let result = std::panic::catch_unwind(|| {
+            pdf_extract::extract_text_from_mem(&bytes)
+        });
+        match result {
+            Ok(Ok(t)) => Ok(t),
+            Ok(Err(e)) => anyhow::bail!("PDF 解析失败: {}。建议用 execute_shell 打开 PDF 后用 analyze_screen 截图分析", e),
+            Err(_) => anyhow::bail!("PDF 编码不兼容。建议用 execute_shell 打开 PDF 后用 analyze_screen 截图查看内容"),
+        }
+    }).await??;
+
+    if text.trim().is_empty() {
+        anyhow::bail!("PDF 未提取到文本内容。可能是扫描件（纯图片），建议用 analyze_screen 截图分析")
+    }
+
+    Ok(text)
+}
+
+pub async fn fetch_crypto_price_pub(symbol: &str) -> anyhow::Result<String> { fetch_crypto_price(symbol).await }
+
+async fn fetch_crypto_price(symbol: &str) -> anyhow::Result<String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .no_proxy()
+        .build()?;
+
+    let url = format!("https://api.binance.com/api/v3/ticker/24hr?symbol={}", symbol);
+    let resp = client.get(&url).send().await?;
+
+    if !resp.status().is_success() {
+        anyhow::bail!("Binance API error: {}", resp.status());
+    }
+
+    let data: serde_json::Value = resp.json().await?;
+
+    let price = data["lastPrice"].as_str().unwrap_or("N/A");
+    let change = data["priceChangePercent"].as_str().unwrap_or("0");
+    let high = data["highPrice"].as_str().unwrap_or("N/A");
+    let low = data["lowPrice"].as_str().unwrap_or("N/A");
+    let volume = data["volume"].as_str().unwrap_or("N/A");
+    let quote_vol = data["quoteVolume"].as_str().unwrap_or("N/A");
+
+    let change_f: f64 = change.parse().unwrap_or(0.0);
+    let emoji = if change_f > 0.0 { "📈" } else if change_f < 0.0 { "📉" } else { "➡️" };
+
+    Ok(format!(
+        "{} {} 实时行情\n\
+当前价格: ${}\n\
+24h涨跌: {}% {}\n\
+24h最高: ${}\n\
+24h最低: ${}\n\
+24h成交量: {} {}\n\
+24h成交额: ${}\n\
+数据来源: Binance API",
+        emoji,
+        symbol,
+        price,
+        change, emoji,
+        high,
+        low,
+        volume, &symbol[..symbol.len().saturating_sub(4)],
+        format_volume(quote_vol),
+    ))
+}
+
+fn format_volume(v: &str) -> String {
+    let f: f64 = v.parse().unwrap_or(0.0);
+    if f >= 1_000_000_000.0 { format!("{:.2}B", f / 1_000_000_000.0) }
+    else if f >= 1_000_000.0 { format!("{:.2}M", f / 1_000_000.0) }
+    else { format!("{:.0}", f) }
+}
+
 pub fn take_screenshot_sync(output_path: &str) -> anyhow::Result<String> {
     let monitors = xcap::Monitor::all().map_err(|e| anyhow::anyhow!("枚举显示器失败: {}", e))?;
     let monitor = monitors
@@ -743,314 +1228,36 @@ pub async fn chat_stream_start(
     message: String,
     history: Vec<HistoryMessage>,
 ) -> ApiResult<String> {
+    use crate::core::engine::*;
+
     let cfg = match config::load_config(&app).await {
         Ok(c) => c,
         Err(e) => return ApiResult::err(format!("Config error: {}", e)),
     };
 
-    let router = match crate::models::ModelRouter::from_config(&cfg) {
-        Ok(r) => r,
-        Err(e) => return ApiResult::err(format!("Model router error: {}", e)),
+    let engine = match AgentEngine::from_config(&cfg) {
+        Ok(e) => e,
+        Err(e) => return ApiResult::err(format!("Engine error: {}", e)),
     };
 
     let stream_id = Uuid::new_v4().to_string();
     let sid = stream_id.clone();
+    let sink = TauriEventSink::new(app);
 
-    let provider = match router.get_primary() {
-        Some(p) => p,
-        None => {
-            tracing::error!("[Desktop] No primary provider! Config models.primary: {:?}", cfg.models.primary.as_ref().map(|m| &m.provider));
-            return ApiResult::err("No model provider configured. 请检查模型配置和 API Key。");
-        }
-    };
-
-    let emitter = app;
     tokio::spawn(async move {
-        tracing::info!("[Desktop] Agent loop starting for message: {}", message.chars().take(50).collect::<String>());
+        let history_msgs = history_messages_to_chat(&history);
+        let messages = build_messages(&cfg.agent.system_prompt, &history_msgs, &message);
 
-        // ── Build initial messages ───────────────────────────────────────
-        let mut messages = vec![ChatMessage {
-            role: MessageRole::System,
-            content: cfg.agent.system_prompt.clone(),
-            name: None,
-            tool_calls: None,
-            tool_call_id: None,
-        }];
-        for h in &history {
-            let role = match h.role.as_str() {
-                "assistant" => MessageRole::Assistant,
-                "system" => MessageRole::System,
-                _ => MessageRole::User,
-            };
-            messages.push(ChatMessage {
-                role,
-                content: h.content.clone(),
-                name: None,
-                tool_calls: None,
-                tool_call_id: None,
-            });
-        }
-        messages.push(ChatMessage {
-            role: MessageRole::User,
-            content: message.clone(),
-            name: None,
-            tool_calls: None,
-            tool_call_id: None,
-        });
+        let agent_cfg = AgentConfig {
+            max_rounds: 8,
+            tools_enabled: cfg.tools.shell_enabled,
+            audit: None,
+            audit_source: crate::security::audit::AuditSource::Local,
+            memory: None,
+            planning_enabled: true,
+        };
 
-        // ── Build tool context ───────────────────────────────────────────
-        let file_roots: Vec<PathBuf> = cfg
-            .tools
-            .file_access
-            .iter()
-            .map(|s| PathBuf::from(shellexpand::tilde(s).to_string()))
-            .collect();
-        let file_ops = FileOps::new(file_roots);
-        let shell = ShellExecutor::new(
-            cfg.tools.shell_enabled,
-            cfg.tools.shell_allowed_commands.clone(),
-        );
-        let tool_defs = build_tool_definitions();
-
-        // ── Agent loop (max 8 tool-call rounds) ─────────────────────────
-        let max_rounds = 8usize;
-        for round in 0..=max_rounds {
-            let use_tools = round < max_rounds && cfg.tools.shell_enabled;
-            let req = ChatRequest {
-                messages: messages.clone(),
-                tools: if use_tools {
-                    Some(tool_defs.clone())
-                } else {
-                    None
-                },
-                temperature: 0.7,
-                max_tokens: None,
-            };
-
-            let thinking_id = Uuid::new_v4().to_string();
-            let _ = emitter.emit("agent-step", serde_json::json!({
-                "id": &thinking_id, "stream_id": &sid,
-                "type": "thinking",
-                "content": if round == 0 { "正在分析你的请求..." } else { "继续思考中..." },
-                "status": "running",
-                "timestamp": chrono::Utc::now().timestamp_millis(),
-            }));
-
-            let _ = emitter.emit("chat-stream-chunk", serde_json::json!({
-                "stream_id": &sid,
-                "delta": if round == 0 { "" } else { "" },
-                "done": false,
-            }));
-
-            tracing::info!("[Desktop] Round {} - calling model with {} messages, tools: {}", round, messages.len(), use_tools);
-
-            let has_pending_tool_calls = {
-                match provider.chat(req.clone()).await {
-                    Err(e) => {
-                        tracing::error!("[Desktop] Model call FAILED: {}", e);
-                        let _ = emitter.emit(
-                            "chat-stream-error",
-                            serde_json::json!({
-                                "stream_id": &sid, "error": e.to_string()
-                            }),
-                        );
-                        return;
-                    }
-                    Ok(resp) => {
-                        tracing::info!("[Desktop] Round {} - model responded, tool_calls: {}, content_len: {}",
-                            round,
-                            resp.message.tool_calls.as_ref().map(|t| t.len()).unwrap_or(0),
-                            resp.message.content.len()
-                        );
-
-                        let _ = emitter.emit("agent-step", serde_json::json!({
-                            "id": &thinking_id, "stream_id": &sid,
-                            "type": "thinking",
-                            "content": format!("第{}轮思考完成", round + 1),
-                            "status": "done",
-                            "timestamp": chrono::Utc::now().timestamp_millis(),
-                        }));
-
-                        let tool_calls = resp.message.tool_calls.clone().unwrap_or_default();
-                        if !tool_calls.is_empty() {
-                            for tc in &tool_calls {
-                                let step_id = Uuid::new_v4().to_string();
-                                let op = tool_operation_type(&tc.name);
-                                let risk_engine = RiskEngine::new(HashMap::new());
-                                let risk = risk_engine.assess(op);
-
-                                if risk == crate::config::RiskLevel::Forbidden {
-                                    let _ = emitter.emit(
-                                        "agent-step",
-                                        serde_json::json!({
-                                            "id": &step_id, "stream_id": &sid,
-                                            "type": "tool_result", "tool": &tc.name,
-                                            "content": format!("操作被禁止: {}", tc.name),
-                                            "status": "error",
-                                            "timestamp": chrono::Utc::now().timestamp_millis(),
-                                        }),
-                                    );
-                                    messages.push(ChatMessage {
-                                        role: MessageRole::Tool,
-                                        content: format!("操作被禁止: {}", tc.name),
-                                        name: Some(tc.name.clone()),
-                                        tool_calls: None,
-                                        tool_call_id: Some(tc.id.clone()),
-                                    });
-                                    continue;
-                                }
-
-                                let is_safe_shell = tc.name == "execute_shell" && is_readonly_shell_command(&tc.arguments);
-                                let needs_approval = !is_safe_shell && matches!(
-                                    risk,
-                                    crate::config::RiskLevel::Moderate
-                                        | crate::config::RiskLevel::Dangerous
-                                );
-
-                                if needs_approval {
-                                    let approval_id = Uuid::new_v4().to_string();
-                                    let risk_str = match risk {
-                                        crate::config::RiskLevel::Dangerous => "dangerous",
-                                        _ => "moderate",
-                                    };
-                                    let _ = emitter.emit("approval-request", serde_json::json!({
-                                        "id": &approval_id,
-                                        "operation": &tc.name,
-                                        "risk_level": risk_str,
-                                        "description": format!("{}({})", tc.name, tc.arguments.chars().take(80).collect::<String>()),
-                                    }));
-                                    let _ = emitter.emit("agent-step", serde_json::json!({
-                                        "id": &step_id, "stream_id": &sid,
-                                        "type": "tool_call", "tool": &tc.name,
-                                        "content": format!("[等待审批] {}({})", tc.name, tc.arguments.chars().take(60).collect::<String>()),
-                                        "status": "blocked",
-                                        "timestamp": chrono::Utc::now().timestamp_millis(),
-                                    }));
-
-                                    let (atx, arx) = tokio::sync::oneshot::channel::<bool>();
-                                    {
-                                        let mut pending = DESKTOP_APPROVALS.lock().unwrap();
-                                        pending.insert(approval_id.clone(), atx);
-                                    }
-
-                                    let approved = tokio::time::timeout(
-                                        std::time::Duration::from_secs(120),
-                                        arx,
-                                    )
-                                    .await
-                                    .ok()
-                                    .and_then(|r| r.ok())
-                                    .unwrap_or(false);
-
-                                    if !approved {
-                                        let _ = emitter.emit(
-                                            "agent-step",
-                                            serde_json::json!({
-                                                "id": &step_id, "stream_id": &sid,
-                                                "type": "tool_result", "tool": &tc.name,
-                                                "content": "用户拒绝或审批超时",
-                                                "status": "error",
-                                                "timestamp": chrono::Utc::now().timestamp_millis(),
-                                            }),
-                                        );
-                                        messages.push(ChatMessage {
-                                            role: MessageRole::Tool,
-                                            content: "操作被用户拒绝或审批超时".to_string(),
-                                            name: Some(tc.name.clone()),
-                                            tool_calls: None,
-                                            tool_call_id: Some(tc.id.clone()),
-                                        });
-                                        continue;
-                                    }
-                                }
-
-                                let _ = emitter.emit(
-                                    "agent-step",
-                                    serde_json::json!({
-                                        "id": &step_id, "stream_id": &sid,
-                                        "type": "tool_call", "tool": &tc.name,
-                                        "content": &tc.arguments,
-                                        "status": "running",
-                                        "timestamp": chrono::Utc::now().timestamp_millis(),
-                                    }),
-                                );
-
-                                let result = dispatch_tool(tc, &file_ops, &shell).await;
-
-                                let _ = emitter.emit(
-                                    "agent-step",
-                                    serde_json::json!({
-                                        "id": &step_id, "stream_id": &sid,
-                                        "type": "tool_result", "tool": &tc.name,
-                                        "content": &result,
-                                        "status": "done",
-                                        "timestamp": chrono::Utc::now().timestamp_millis(),
-                                    }),
-                                );
-
-                                // Add assistant tool-call message + tool result to history
-                                messages.push(ChatMessage {
-                                    role: MessageRole::Assistant,
-                                    content: String::new(),
-                                    name: None,
-                                    tool_calls: Some(vec![tc.clone()]),
-                                    tool_call_id: None,
-                                });
-                                messages.push(ChatMessage {
-                                    role: MessageRole::Tool,
-                                    content: result,
-                                    name: Some(tc.name.clone()),
-                                    tool_calls: None,
-                                    tool_call_id: Some(tc.id.clone()),
-                                });
-                            }
-                            true // continue agent loop
-                        } else {
-                            let final_content = resp.message.content.clone();
-                            tracing::info!("[Desktop] Emitting final answer ({} chars)", final_content.len());
-
-                            let test_result = emitter.emit(
-                                "chat-stream-chunk",
-                                serde_json::json!({
-                                    "stream_id": &sid,
-                                    "delta": &final_content,
-                                    "done": false,
-                                }),
-                            );
-                            tracing::info!("[Desktop] Emit result: {:?}", test_result);
-
-                            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-                            let _ = emitter.emit(
-                                "chat-stream-chunk",
-                                serde_json::json!({
-                                    "stream_id": &sid, "delta": "", "done": true,
-                                }),
-                            );
-                            let _ =
-                                emitter.emit("agent-done", serde_json::json!({ "stream_id": &sid }));
-                            false
-                        }
-                    }
-                }
-            };
-
-            if !has_pending_tool_calls {
-                break;
-            }
-
-            if round == max_rounds {
-                let _ = emitter.emit(
-                    "chat-stream-chunk",
-                    serde_json::json!({
-                        "stream_id": &sid,
-                        "delta": "\n\n⚠️ 已达到最大工具调用轮次，操作停止。",
-                        "done": true,
-                    }),
-                );
-                let _ = emitter.emit("agent-done", serde_json::json!({ "stream_id": &sid }));
-            }
-        }
+        engine.run(messages, &sid, &sink, &agent_cfg).await;
     });
 
     ApiResult::ok(stream_id)

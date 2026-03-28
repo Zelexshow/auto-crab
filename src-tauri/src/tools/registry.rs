@@ -97,7 +97,7 @@ impl ToolRegistry {
 
         self.register(ToolSpec {
             name: "search_web".into(),
-            description: "Search the web for information".into(),
+            description: "Search the web for information using Bing (China-accessible) with DuckDuckGo fallback. Returns titles, snippets, and URLs.".into(),
             operation_type: "search_web".into(),
             parameters: vec![ToolParam {
                 name: "query".into(),
@@ -163,6 +163,62 @@ impl ToolRegistry {
                 description: "The URL to fetch (e.g. https://example.com/article)".into(),
                 required: true,
             }],
+        });
+
+        self.register(ToolSpec {
+            name: "read_pdf".into(),
+            description: "Read and extract text content from a PDF file. Returns the text for summarization or analysis.".into(),
+            operation_type: "read_file".into(),
+            parameters: vec![
+                ToolParam { name: "path".into(), param_type: "string".into(), description: "Path to the PDF file".into(), required: true },
+                ToolParam { name: "max_pages".into(), param_type: "integer".into(), description: "Max pages to read (default: 20)".into(), required: false },
+            ],
+        });
+
+        self.register(ToolSpec {
+            name: "get_crypto_price".into(),
+            description: "Get real-time cryptocurrency price from Binance API. Returns current price, 24h change, high, low, volume. No screenshot needed - direct API data.".into(),
+            operation_type: "read_file".into(),
+            parameters: vec![
+                ToolParam { name: "symbol".into(), param_type: "string".into(), description: "Trading pair symbol, e.g. BTCUSDT, ETHUSDT, SOLUSDT".into(), required: true },
+            ],
+        });
+
+        self.register(ToolSpec {
+            name: "quick_reply_wechat".into(),
+            description: "Send a message to a WeChat contact quickly. Focuses WeChat window, finds the contact in chat list, clicks input box, types message, and sends. This is a high-level macro - use this instead of manual analyze_screen + mouse_click sequences for WeChat replies.".into(),
+            operation_type: "execute_shell".into(),
+            parameters: vec![
+                ToolParam { name: "contact".into(), param_type: "string".into(), description: "Contact name or group name to send to".into(), required: true },
+                ToolParam { name: "message".into(), param_type: "string".into(), description: "Message text to send".into(), required: true },
+            ],
+        });
+
+        self.register(ToolSpec {
+            name: "get_ui_tree".into(),
+            description: "Get the UI element tree of the foreground window. Returns structured text of all controls with types, names, coordinates, and states. 10x FASTER than analyze_screen and gives EXACT coordinates. Use this FIRST for standard apps (WeChat, browsers, etc). Falls back to analyze_screen only for Canvas/game UIs.".into(),
+            operation_type: "read_file".into(),
+            parameters: vec![
+                ToolParam { name: "window_title".into(), param_type: "string".into(), description: "Optional: specific window title (default: foreground window)".into(), required: false },
+                ToolParam { name: "max_depth".into(), param_type: "integer".into(), description: "Max tree depth (default: 8)".into(), required: false },
+            ],
+        });
+
+        self.register(ToolSpec {
+            name: "focus_window".into(),
+            description: "Bring a window to the foreground by its title (partial match). Use this BEFORE interacting with a specific app to ensure it's focused.".into(),
+            operation_type: "execute_shell".into(),
+            parameters: vec![ToolParam { name: "title".into(), param_type: "string".into(), description: "Window title to search for (partial match, e.g. '微信')".into(), required: true }],
+        });
+
+        self.register(ToolSpec {
+            name: "analyze_and_act".into(),
+            description: "Take a screenshot, analyze it with AI vision, and execute actions (click/type/key_press) in ONE step. This is the PREFERRED tool for desktop automation - it combines seeing and acting. Much faster than calling analyze_screen + mouse_click separately. Returns result after executing.".into(),
+            operation_type: "execute_shell".into(),
+            parameters: vec![
+                ToolParam { name: "task".into(), param_type: "string".into(), description: "The task to accomplish (e.g. 'click the Send button', 'type hello in the input box', 'find and click WeChat in the chat list')".into(), required: true },
+                ToolParam { name: "max_steps".into(), param_type: "integer".into(), description: "Maximum action steps (default: 3)".into(), required: false },
+            ],
         });
 
         self.register(ToolSpec {

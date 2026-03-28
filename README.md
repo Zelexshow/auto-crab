@@ -1,18 +1,77 @@
-# 🦀 Auto Crab — 安全桌面 AI 助理
+# 🦀 Auto Crab — AI 全能生活助理
 
 比 OpenClaw 更安全、更受控、配置更简单的桌面级 AI 助理。
 
-支持通义千问、DeepSeek、智谱 GLM、Kimi、OpenAI、Claude 以及本地 Ollama 模型。
+支持 DeepSeek、通义千问（含 VL 视觉）、智谱 GLM、Kimi、OpenAI、Claude 以及本地 Ollama 模型。
 
 ---
 
 ## 文档索引
 
-- 飞书远程控制完整配置：`docs/feishu-setup.md`
+| 文档 | 说明 |
+|------|------|
+| `docs/feishu-setup.md` | 飞书远程控制完整配置 |
+| `docs/life-assistant-plan.md` | 生活助理系统方案设计 |
+| `docs/desktop-vision-automation-plan.md` | 桌面视觉自动化方案 |
+| `TASKS.md` | 开发任务清单与进度 |
 
-## 快速启动
+---
 
-### 前置条件
+## 日常启动指引
+
+### 方式一：完整启动（桌面端 + 飞书远控）
+
+打开 **两个 PowerShell 终端**：
+
+**终端 1 — 启动 Auto Crab：**
+
+```powershell
+# 如果 cargo 找不到，先加 PATH（永久配好后可省略）
+$env:Path = "$env:USERPROFILE\.cargo\bin;$env:Path"
+
+# 进入项目目录
+cd C:\Workspace\aiProg\auto-crab
+
+# 启动开发模式
+pnpm tauri dev
+```
+
+看到以下日志说明启动成功：
+```
+INFO Auto Crab starting...
+INFO Webhook server started on port 18790
+INFO TaskScheduler started with 4 jobs    ← 定时任务已加载
+INFO System tray initialized
+```
+
+**终端 2 — 启动 ngrok（飞书远控需要）：**
+
+```powershell
+ngrok http 18790
+```
+
+启动后会显示公网地址（如 `https://xxxx.ngrok-free.app`），把这个地址更新到飞书开放平台 → 事件订阅 → 请求地址。
+
+> ⚠️ ngrok 免费版每次重启地址会变，需要同步更新飞书后台。
+
+### 方式二：仅桌面端（不需要飞书）
+
+```powershell
+$env:Path = "$env:USERPROFILE\.cargo\bin;$env:Path"
+cd C:\Workspace\aiProg\auto-crab
+pnpm tauri dev
+```
+
+### 关机后重启检查清单
+
+- [ ] Auto Crab 启动（`pnpm tauri dev`）
+- [ ] ngrok 启动（`ngrok http 18790`）
+- [ ] 飞书后台更新 ngrok 地址（如果地址变了）
+- [ ] 飞书发 `/status` 验证连通性
+
+---
+
+## 前置条件
 
 | 工具 | 版本 | 安装方式 |
 |------|------|---------|
@@ -28,44 +87,18 @@ curl -k -L -o "%TEMP%\vs_BuildTools.exe" "https://aka.ms/vs/17/release/vs_BuildT
 "%TEMP%\vs_BuildTools.exe" --add Microsoft.VisualStudio.Workload.VCTools --add Microsoft.VisualStudio.Component.Windows11SDK.22621 --includeRecommended --passive --wait --norestart
 ```
 
-### 安装依赖
+### 首次安装
 
 ```bash
 cd auto-crab
-
-# 安装前端依赖
-pnpm install
-
-# Rust 依赖会在首次编译时自动下载
+pnpm install          # 前端依赖
+# Rust 依赖首次编译自动下载（约 3-5 分钟）
 ```
 
 ### 配置 PATH（重要）
 
-Rust 安装后 `cargo` 在 `%USERPROFILE%\.cargo\bin` 目录下，新开的终端可能找不到它，会报 `program not found` 错误。
-
 **永久解决（推荐）：** 把 `%USERPROFILE%\.cargo\bin` 添加到系统环境变量 PATH 中：
 - Windows 设置 → 系统 → 关于 → 高级系统设置 → 环境变量 → 用户变量 PATH → 新建 → 输入 `%USERPROFILE%\.cargo\bin`
-
-**临时解决：** 每次开终端先执行一次：
-
-```cmd
-:: CMD 终端
-set PATH=%USERPROFILE%\.cargo\bin;%PATH%
-```
-
-```powershell
-# PowerShell 终端
-$env:Path = "$env:USERPROFILE\.cargo\bin;$env:Path"
-```
-
-### 开发模式启动
-
-```bash
-pnpm tauri dev
-```
-
-首次编译约 3-5 分钟（下载 + 编译 480+ 个 Rust crate），后续增量编译很快。
-启动后会弹出桌面应用窗口。
 
 ### 生产构建
 
@@ -81,111 +114,116 @@ pnpm tauri build
 
 ### 1. 配置模型 API Key
 
-应用首次启动会弹出向导，也可以手动配置：
-
 **方式一：通过应用 UI**
+1. 打开应用 → 左侧边栏 → **设置** → **密钥管理**
+2. 选择提供商名称（如 `deepseek`）
+3. 粘贴 API Key → 点击"保存到密钥链"
 
-1. 打开应用 → 左侧边栏 → **设置**
-2. 点击 **密钥管理** 标签
-3. 密钥名称选择对应的提供商（如 `deepseek`）
-4. 粘贴你的 API Key
-5. 点击 **"保存到密钥链"**
+**方式二：命令行**
+```powershell
+cd src-tauri
+cargo run --example store_key -- deepseek sk-你的密钥
+cargo run --example store_key -- dashscope sk-你的密钥
+```
 
-**方式二：编辑配置文件**
+### 2. 配置文件
 
-配置文件位置：
-- Windows: `%APPDATA%\com.zelex.auto-crab\auto-crab.toml`
-- macOS: `~/Library/Application Support/com.zelex.auto-crab/auto-crab.toml`
-- Linux: `~/.config/com.zelex.auto-crab/auto-crab.toml`
+位置：`%APPDATA%\com.zelex.auto-crab\auto-crab.toml`
 
 ```toml
 [models.primary]
-provider = "deepseek"          # 可选: dashscope / deepseek / zhipu / moonshot / openai / anthropic / ollama
-model = "deepseek-chat"        # 模型名称
-api_key_ref = "keychain://deepseek"  # 引用密钥链中的 key
+provider = "deepseek"
+model = "deepseek-chat"
+api_key_ref = "keychain://deepseek"
+
+[models.vision]
+provider = "dashscope_vl"
+model = "qwen3-vl-plus"
+api_key_ref = "keychain://dashscope"
 ```
 
-### 2. 支持的模型提供商
+### 3. 支持的模型
 
 | 提供商 | provider 值 | 推荐模型 | 备注 |
 |--------|------------|---------|------|
-| 通义千问 | `dashscope` | `qwen-max` | 阿里云，国内速度快 |
-| DeepSeek | `deepseek` | `deepseek-chat` | 性价比高 |
+| DeepSeek | `deepseek` | `deepseek-chat` | 性价比高，主力对话 |
+| 通义千问 | `dashscope` | `qwen-max` | 国内速度快 |
+| 通义千问 VL | `dashscope_vl` | `qwen3-vl-plus` | 视觉分析（截图/K线） |
 | 智谱 GLM | `zhipu` | `glm-4` | 清华技术背景 |
 | 月之暗面 | `moonshot` | `moonshot-v1-128k` | 超长上下文 |
 | OpenAI | `openai` | `gpt-4o` | 需要翻墙 |
 | Claude | `anthropic` | `claude-sonnet-4-20250514` | 需要翻墙 |
-| Ollama | `ollama` | `qwen2.5:14b` | 本地运行，无需 API Key |
-
-**使用 Ollama（本地模型）：**
-
-```bash
-# 安装 Ollama 后
-ollama pull qwen2.5:14b
-ollama serve
-```
-
-配置文件：
-
-```toml
-[models.primary]
-provider = "ollama"
-model = "qwen2.5:14b"
-endpoint = "http://localhost:11434"
-```
+| Ollama | `ollama` | `qwen2.5:14b` | 本地运行 |
 
 ---
 
-## 功能说明
+## 核心能力
 
-### 对话
+### 工具列表（16 个）
 
-- 支持 Markdown 渲染、代码高亮
-- 流式输出（打字机效果）
-- 对话历史自动保存，重启后可恢复
-- 顶栏可切换模型和主题（亮色/暗色/跟随系统）
+| 工具 | 说明 | 风险级别 |
+|------|------|---------|
+| `read_file` / `list_directory` | 文件读取/列目录 | 安全 |
+| `write_file` | 文件写入（自动快照） | 中风险 |
+| `read_pdf` | PDF 文本提取 | 安全 |
+| `execute_shell` | 命令执行 | 高风险 |
+| `search_web` | 网页搜索（DuckDuckGo） | 安全 |
+| `fetch_webpage` | 网页内容抓取 | 安全 |
+| `get_crypto_price` | 加密货币实时价格（Binance） | 安全 |
+| `screenshot` / `analyze_screen` | 截图/视觉分析 | 安全 |
+| `analyze_and_act` | 截图+分析+操作一步到位 | 高风险 |
+| `get_ui_tree` | Windows 控件树（<500ms） | 安全 |
+| `focus_window` | 窗口聚焦 | 中风险 |
+| `mouse_click` / `keyboard_type` / `key_press` | 鼠标键盘操控 | 高风险 |
+| `quick_reply_wechat` | 微信快速回复 | 高风险 |
 
-### 安全机制
+### 飞书远程指令
 
-Auto Crab 的核心差异化——四级操作风险管控：
+| 指令 | 说明 |
+|------|------|
+| 普通文字 | AI 对话（按用户保留上下文） |
+| `/status` | 系统状态 + 模型配置 |
+| `/status models` | 详细模型列表 |
+| `/session 名称` | 切换到指定会话 |
+| `/sessions` | 查看所有会话 |
+| `/reset` | 清空当前会话 |
+| `/undo` | 撤回最近一次文件修改 |
+| `/monitor 60 盯BTC` | 定时监控（秒为单位） |
+| `/monitors` | 查看活跃监控 |
+| `/monitor stop ID` | 停止监控 |
+| `/task 描述` | 创建审批任务 |
+| `/approve ID` | 批准 |
+| `/reject ID` | 拒绝 |
 
-| 级别 | 颜色 | 操作示例 | 行为 |
-|------|------|---------|------|
-| 安全 | 🟢 | 读文件、搜索 | 自动执行 |
-| 中风险 | 🟡 | 写文件、Git 提交 | 弹窗确认 |
-| 高风险 | 🔴 | 执行命令、删除文件 | 密码二次验证 |
-| 禁止 | ⛔ | 格式化磁盘、修改引导 | 永远不允许 |
+### 生活助理（定时任务）
 
-### 远程控制
+配置在 `auto-crab.toml` 的 `[scheduled_tasks]` 中：
 
-通过飞书或企业微信远程控制桌面端 AI 助理：
+| 时间 | 任务 | 内容 |
+|------|------|------|
+| 每日 07:30 | 晨间投资简报 | 读持仓→查价格→搜新闻→生成简报→推飞书 |
+| 每日 19:00 | 选题推荐 | 搜热点→读模板→生成选题→推飞书 |
+| 每日 21:00 | 学习提醒 | 读计划→搜动态→简要总结→推飞书 |
+| 每周日 10:00 | 周度复盘 | 读周数据→综合分析→生成周报→推飞书 |
 
-```toml
-[remote]
-enabled = true
+数据目录：`~/ai-assistant-data/`（投资/职业/副业三个模块）
 
-[remote.feishu]
-app_id = "cli_xxxxxxxx"
-app_secret_ref = "keychain://feishu-secret"
-poll_interval_secs = 30
-allowed_user_ids = ["user_id_1"]
-```
+Prompt 模板：`~/ai-assistant-data/config/prompts/`（可随时修改，无需重启）
 
-远程指令格式：
-- 直接发文字 → AI 对话（按用户保留连续上下文）
-- `/status` → 查询状态
-- `/task 任务描述` → 创建审批任务（返回审批 ID）
-- `/approve ID` → 批准并执行任务
-- `/reject ID` → 拒绝任务
-- `/reset` → 清空当前远程会话上下文
+---
 
-详细的飞书后台配置与排障步骤见：`docs/feishu-setup.md`
+## 安全机制
 
-### 系统托盘
+| 级别 | 操作示例 | 行为 |
+|------|---------|------|
+| 🟢 安全 | 读文件、搜索、截图 | 自动执行 |
+| 🟡 中风险 | 写文件、聚焦窗口 | 弹窗确认 |
+| 🔴 高风险 | 执行命令、鼠标操控 | 弹窗确认 |
+| ⛔ 禁止 | 格式化磁盘、修改引导 | 永远不允许 |
 
-- 应用最小化后驻留在系统托盘
-- 双击托盘图标恢复窗口
-- 右键托盘菜单：显示窗口 / 退出
+- 只读 Shell 命令（dir/ls/cat）自动通过
+- write_file 前自动打快照，支持 `/undo` 撤回
+- 审计日志持久化到 JSONL 文件
 
 ---
 
@@ -196,25 +234,30 @@ auto-crab/
 ├── src/                        # 前端 (React + TypeScript + Tailwind)
 │   ├── components/
 │   │   ├── Chat/               # 对话界面 + 消息气泡 + 模型选择器
-│   │   ├── Settings/           # 设置页面 (5个标签页)
+│   │   ├── Settings/           # 设置页面 (模型/安全/工具/远程/密钥)
 │   │   ├── Sidebar/            # 侧边栏 + 历史对话
+│   │   ├── TaskPanel/          # 工具执行面板（右侧实时显示）
 │   │   ├── ApprovalDialog/     # 操作审批弹窗
 │   │   ├── AuditLog/           # 审计日志查看器
-│   │   ├── Onboarding/         # 首次运行向导
-│   │   └── TaskPanel/          # 任务监控面板
+│   │   └── Onboarding/         # 首次运行向导
 │   └── stores/                 # Zustand 状态管理
 ├── src-tauri/                  # Rust 后端
 │   ├── src/
-│   │   ├── core/               # Agent 运行时 / 上下文 / 记忆 / 调度 / 快照
+│   │   ├── core/               # Agent 运行时 / 记忆 / 调度 / 快照 / 宏
 │   │   ├── models/             # 模型适配器 (OpenAI兼容 / Ollama / 路由)
 │   │   ├── security/           # 风险引擎 / 凭据 / 审计 / 审批
-│   │   ├── tools/              # 文件 / Shell / 网络 / 浏览器
+│   │   ├── tools/              # 文件 / Shell / 网络 / 浏览器 / UI Automation
 │   │   ├── remote/             # 飞书 / 企业微信 / 审批桥接
 │   │   ├── plugins/            # WASM 插件沙箱
-│   │   ├── commands.rs         # Tauri IPC 命令
-│   │   └── lib.rs              # 应用入口
+│   │   ├── commands.rs         # Tauri IPC 命令 + 工具调度
+│   │   └── lib.rs              # 应用入口 + 调度器 + 远程处理
+│   ├── capabilities/           # Tauri 2.0 权限声明
 │   └── defaults/               # 默认配置模板
-├── TASKS.md                    # 开发任务清单
+├── docs/                       # 文档
+│   ├── feishu-setup.md         # 飞书配置指南
+│   ├── life-assistant-plan.md  # 生活助理方案
+│   └── desktop-vision-automation-plan.md  # 视觉自动化方案
+├── TASKS.md                    # 开发任务清单（100+ 任务）
 └── README.md                   # 本文档
 ```
 
@@ -225,20 +268,20 @@ auto-crab/
 **Q: 编译报错 `link.exe not found`？**
 A: 安装 Visual Studio Build Tools，见上方"前置条件"。
 
-**Q: 编译报错 `can't find crate for core`？**
-A: 运行 `rustup component remove rust-std && rustup component add rust-std`。
-
-**Q: 网络下载慢？**
-A: 设置 Rust 中国镜像源：
-```bash
-export RUSTUP_DIST_SERVER=https://mirrors.ustc.edu.cn/rust-static
-```
-
 **Q: 对话返回 `No model provider configured`？**
-A: 配置文件中 `[models.primary]` 未设置。参考上方"首次使用"。
+A: 检查配置文件 `[models.primary]` 和密钥链。重启应用。
 
 **Q: API 返回 401 `invalid_api_key`？**
-A: 密钥名称和配置文件中的 `api_key_ref` 要对应。如配置写 `keychain://deepseek`，则密钥名称必须是 `deepseek`。
+A: 密钥名称和 `api_key_ref` 要对应。如 `keychain://deepseek` 对应密钥名 `deepseek`。
+
+**Q: 飞书消息无响应？**
+A: 检查 ngrok 是否运行、飞书后台地址是否更新、`allowed_user_ids` 是否配置。看终端日志。
+
+**Q: 桌面端聊天卡在"思考中"？**
+A: 模型 API 调用中（非流式），等 10-30 秒。如果超过 2 分钟，检查终端日志。
+
+**Q: 网络下载慢？**
+A: 设置 Rust 中国镜像：`$env:RUSTUP_DIST_SERVER = "https://mirrors.ustc.edu.cn/rust-static"`
 
 ---
 
@@ -246,6 +289,8 @@ A: 密钥名称和配置文件中的 `api_key_ref` 要对应。如配置写 `key
 
 - **前端**: React 19 + TypeScript + Tailwind CSS 4 + Zustand
 - **后端**: Rust + Tauri 2.0
-- **模型**: OpenAI 兼容 API + Ollama
-- **安全**: keyring (系统密钥链) + AES-GCM + 四级风险引擎
-- **存储**: TOML 配置 + JSON 对话持久化 + JSONL 审计日志
+- **模型**: OpenAI 兼容 API (DeepSeek/通义/智谱/Kimi) + DashScope VL + Ollama
+- **安全**: keyring (系统密钥链) + 四级风险引擎 + 审计日志
+- **视觉**: xcap (截图) + Qwen3-VL (分析) + enigo (鼠标键盘) + Windows UI Automation
+- **数据**: TOML 配置 + JSON 持久化 + JSONL 审计 + Binance API + DuckDuckGo 搜索
+- **远程**: 飞书 Bot (Webhook) + ngrok 隧道

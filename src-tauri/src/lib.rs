@@ -127,6 +127,35 @@ impl RemoteConversationState {
     }
 }
 
+fn create_memory(cfg: &config::AppConfig) -> Option<std::sync::Arc<core::long_memory::LongTermMemory>> {
+    if !cfg.agent.long_term_memory {
+        return None;
+    }
+
+    let dashscope_key = cfg.models.vision.as_ref()
+        .and_then(|m| m.api_key_ref.as_deref())
+        .and_then(|r| crate::security::credentials::CredentialStore::resolve_ref(r).ok());
+
+    dashscope_key.map(|key| {
+        let data_dir = directories::ProjectDirs::from("com", "zelex", "auto-crab")
+            .map(|d| d.data_dir().to_path_buf())
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        tracing::info!("[Memory] Long-term memory enabled (DashScope Embedding)");
+        std::sync::Arc::new(core::long_memory::LongTermMemory::new(data_dir, key))
+    })
+}
+
+fn extract_crypto_symbols(desc: &str) -> Vec<String> {
+    let desc_upper = desc.to_uppercase();
+    let known = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "DOGEUSDT", "ADAUSDT", "AVAXUSDT"];
+    let mut found: Vec<String> = known.iter()
+        .filter(|s| desc_upper.contains(&s[..s.len()-4]))
+        .map(|s| s.to_string())
+        .collect();
+    if found.is_empty() { found.push("BTCUSDT".into()); }
+    found
+}
+
 fn build_remote_reply(text: &str) -> String {
     let cmd = text.trim();
     if cmd.starts_with("/status") {
@@ -152,119 +181,25 @@ async fn run_remote_chat(
     user_input: &str,
     audit: Option<&std::sync::Arc<security::audit::AuditLogger>>,
 ) -> anyhow::Result<String> {
-    use crate::models::provider::*;
-    use crate::tools::file_ops::FileOps;
-    use crate::tools::shell::ShellExecutor;
+    use crate::core::engine::*;
 
-    let router = crate::models::ModelRouter::from_config(cfg)?;
-    let provider = router
-        .get_primary()
-        .ok_or_else(|| anyhow::anyhow!("No model provider configured"))?;
+    let engine = AgentEngine::from_config(cfg)?;
+    let messages = build_messages(&cfg.agent.system_prompt, history, user_input);
+    let sink = StringCollectorSink;
+    let stream_id = uuid::Uuid::new_v4().to_string();
 
-    let mut messages = vec![ChatMessage {
-        role: MessageRole::System,
-        content: cfg.agent.system_prompt.clone(),
-        name: None,
-        tool_calls: None,
-        tool_call_id: None,
-    }];
-    messages.extend(history.iter().cloned());
-    messages.push(ChatMessage {
-        role: MessageRole::User,
-        content: user_input.to_string(),
-        name: None,
-        tool_calls: None,
-        tool_call_id: None,
-    });
+    let memory = create_memory(cfg);
+    let agent_cfg = AgentConfig {
+        max_rounds: 6,
+        tools_enabled: cfg.tools.shell_enabled,
+        audit: audit.cloned(),
+        audit_source: security::audit::AuditSource::Feishu,
+        memory,
+        planning_enabled: true,
+    };
 
-    let file_roots: Vec<std::path::PathBuf> = cfg
-        .tools
-        .file_access
-        .iter()
-        .map(|s| std::path::PathBuf::from(shellexpand::tilde(s).to_string()))
-        .collect();
-    let file_ops = FileOps::new(file_roots);
-    let shell = ShellExecutor::new(
-        cfg.tools.shell_enabled,
-        cfg.tools.shell_allowed_commands.clone(),
-    );
-    let tool_defs = commands::build_tool_definitions();
-
-    for round in 0..=6usize {
-        let use_tools = round < 6 && cfg.tools.shell_enabled;
-        let req = ChatRequest {
-            messages: messages.clone(),
-            tools: if use_tools {
-                Some(tool_defs.clone())
-            } else {
-                None
-            },
-            temperature: 0.7,
-            max_tokens: None,
-        };
-
-        let resp = provider.chat(req).await?;
-        let tool_calls = resp.message.tool_calls.clone().unwrap_or_default();
-
-        if !tool_calls.is_empty() {
-            for tc in &tool_calls {
-                let args_preview: String = tc.arguments.chars().take(120).collect();
-                tracing::info!("Remote tool call: {}({})", tc.name, args_preview);
-                let mut result = commands::dispatch_tool_with_audit(
-                    tc,
-                    &file_ops,
-                    &shell,
-                    audit,
-                    security::audit::AuditSource::Feishu,
-                )
-                .await;
-
-                if result.starts_with("__ANALYZE_SCREEN__:") {
-                    let rest = &result["__ANALYZE_SCREEN__:".len()..];
-                    if let Some(sep) = rest.find("::") {
-                        let img_path = &rest[..sep];
-                        let question = &rest[sep + 2..];
-                        tracing::info!("Analyzing screenshot with VL model: {}", img_path);
-                        match commands::analyze_screenshot(cfg, img_path).await {
-                            Ok(analysis) => {
-                                result = format!(
-                                    "屏幕截图分析结果（问题：{}）：\n\n{}",
-                                    question, analysis
-                                );
-                            }
-                            Err(e) => {
-                                result =
-                                    format!("截图已保存到 {}，但视觉分析失败: {}", img_path, e);
-                            }
-                        }
-                    }
-                }
-
-                let result_preview: String = result.chars().take(300).collect();
-                tracing::info!("Remote tool result: {}", result_preview);
-
-                messages.push(ChatMessage {
-                    role: MessageRole::Assistant,
-                    content: String::new(),
-                    name: None,
-                    tool_calls: Some(vec![tc.clone()]),
-                    tool_call_id: None,
-                });
-                messages.push(ChatMessage {
-                    role: MessageRole::Tool,
-                    content: result,
-                    name: Some(tc.name.clone()),
-                    tool_calls: None,
-                    tool_call_id: Some(tc.id.clone()),
-                });
-            }
-            continue;
-        }
-
-        return Ok(resp.message.content);
-    }
-
-    Ok("已达到最大工具调用轮次，操作停止。".to_string())
+    let result = engine.run(messages, &stream_id, &sink, &agent_cfg).await;
+    Ok(result)
 }
 
 async fn handle_remote_control_command(
@@ -403,6 +338,46 @@ async fn handle_remote_control_command(
                         round += 1;
 
                         tracing::info!("Monitor {} round {}: {}", mid, round, desc);
+
+                        let desc_lower = desc.to_lowercase();
+                        let is_crypto = desc_lower.contains("btc") || desc_lower.contains("eth")
+                            || desc_lower.contains("sol") || desc_lower.contains("盯盘")
+                            || desc_lower.contains("币") || desc_lower.contains("usdt");
+
+                        if is_crypto {
+                            let symbols = extract_crypto_symbols(&desc);
+                            let mut price_lines = Vec::new();
+                            for sym in &symbols {
+                                match commands::fetch_crypto_price_pub(sym).await {
+                                    Ok(info) => price_lines.push(info),
+                                    Err(e) => price_lines.push(format!("{}: 获取失败 {}", sym, e)),
+                                }
+                            }
+
+                            let now = chrono::Local::now().format("%H:%M:%S").to_string();
+                            let price_text = price_lines.join("\n---\n");
+
+                            let history_summary = history.iter().map(|(ts, a)| {
+                                format!("[{}] {}", ts, a.chars().take(80).collect::<String>())
+                            }).collect::<Vec<_>>().join("\n");
+
+                            let analysis = if history.is_empty() {
+                                format!("📊 第{}轮监控\n\n{}", round, price_text)
+                            } else {
+                                format!("📊 第{}轮监控\n\n{}\n\n历史趋势:\n{}", round, price_text, history_summary)
+                            };
+
+                            history.push((now, price_lines.first().cloned().unwrap_or_default()));
+                            if history.len() > max_history { history.remove(0); }
+
+                            let msg = format!("🔍 [{}] {}\n\n{}", mid, desc, analysis);
+                            if let Some(ref fc) = feishu_config {
+                                let mut bot = crate::remote::feishu::FeishuBot::new(fc.clone());
+                                let _ = bot.send_message(&user_id, &msg).await;
+                            }
+                            continue;
+                        }
+
                         let tmp = format!(
                             "{}\\AppData\\Local\\Temp\\auto-crab-monitor-{}.png",
                             std::env::var("USERPROFILE").unwrap_or_else(|_| ".".into()),
@@ -677,6 +652,11 @@ pub fn run() {
                                 .feishu
                                 .as_ref()
                                 .map(|c| remote::feishu::FeishuBot::new(c.clone()));
+                            let mut wechat_work_bot = cfg
+                                .remote
+                                .wechat_work
+                                .as_ref()
+                                .map(|c| remote::wechat_work::WechatWorkBot::new(c.clone()));
                             // Process incoming commands in background
                             let cfg_for_remote = cfg.clone();
                             tokio::spawn(async move {
@@ -688,22 +668,70 @@ pub fn run() {
                                         cmd.command_type,
                                         cmd.text
                                     );
-                                    if cmd.source == "feishu" {
-                                        if let Some(bot) = feishu_bot.as_mut() {
-                                            let reply = handle_remote_control_command(
-                                                &handle_clone,
-                                                &cfg_for_remote,
-                                                &cmd,
-                                            )
-                                            .await;
-                                            if let Err(e) =
-                                                bot.send_message(&cmd.user_id, &reply).await
-                                            {
-                                                tracing::warn!(
-                                                    "Failed to reply Feishu message to {}: {}",
-                                                    cmd.user_id,
-                                                    e
-                                                );
+                                    let reply = handle_remote_control_command(
+                                        &handle_clone,
+                                        &cfg_for_remote,
+                                        &cmd,
+                                    )
+                                    .await;
+
+                                    match cmd.source.as_str() {
+                                        "feishu" => {
+                                            if let Some(bot) = feishu_bot.as_mut() {
+                                                if let Err(e) = bot.send_message(&cmd.user_id, &reply).await {
+                                                    tracing::warn!("Failed to reply Feishu message to {}: {}", cmd.user_id, e);
+                                                }
+                                            }
+                                        }
+                                        "wechat_work" => {
+                                            if let Some(bot) = wechat_work_bot.as_mut() {
+                                                if let Err(e) = bot.send_message(&cmd.user_id, &reply).await {
+                                                    tracing::warn!("Failed to reply WeChat Work message to {}: {}", cmd.user_id, e);
+                                                }
+                                            }
+                                        }
+                                        _ => {
+                                            tracing::warn!("Unknown remote source: {}", cmd.source);
+                                        }
+                                    }
+                                }
+                            });
+                        }
+
+                        // Start task scheduler if enabled
+                        if cfg.scheduled_tasks.enabled && !cfg.scheduled_tasks.jobs.is_empty() {
+                            let mut scheduler = core::scheduler::TaskScheduler::new(
+                                cfg.scheduled_tasks.jobs.clone(),
+                                cfg.scheduled_tasks.require_confirmation,
+                            );
+                            let sched_cfg = cfg.clone();
+                            let sched_feishu = cfg.remote.feishu.clone();
+                            let sched_user = cfg.remote.feishu.as_ref()
+                                .and_then(|f| f.allowed_user_ids.first().cloned())
+                                .unwrap_or_default();
+
+                            tokio::spawn(async move {
+                                tracing::info!("TaskScheduler started with {} jobs", sched_cfg.scheduled_tasks.jobs.len());
+                                loop {
+                                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                                    let due = scheduler.check_due_jobs();
+                                    for job in due {
+                                        tracing::info!("Scheduled task triggered: {} (auto={})", job.name, job.auto_execute);
+                                        if job.auto_execute {
+                                            let result = run_remote_chat(&sched_cfg, &[], &job.action, None).await;
+                                            let msg = match result {
+                                                Ok(text) => format!("📋 定时任务: {}\n\n{}", job.name, text),
+                                                Err(e) => format!("📋 定时任务: {} 执行失败\n{}", job.name, e),
+                                            };
+                                            if let Some(ref fc) = sched_feishu {
+                                                let mut bot = remote::feishu::FeishuBot::new(fc.clone());
+                                                let _ = bot.send_message(&sched_user, &msg).await;
+                                            }
+                                        } else {
+                                            if let Some(ref fc) = sched_feishu {
+                                                let mut bot = remote::feishu::FeishuBot::new(fc.clone());
+                                                let msg = format!("📋 定时任务待确认: {}\n\n内容: {}\n\n回复 /approve 执行", job.name, job.action.chars().take(200).collect::<String>());
+                                                let _ = bot.send_message(&sched_user, &msg).await;
                                             }
                                         }
                                     }

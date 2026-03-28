@@ -74,12 +74,12 @@
 - [x] T-042: 实现操作回滚 — `core/snapshots.rs` (文件快照 + 恢复 + 自动清理)
 - [x] T-043: 实现审计日志查看器 UI — `AuditLog/AuditLogView.tsx`
 
-## P6: 发布 (Release) — 待实施
+## P6: 发布 (Release) — 部分完成
 
-- [ ] T-044: 配置 GitHub Actions CI/CD (Windows / macOS / Linux)
-- [ ] T-045: 配置 Tauri Updater 自动更新
-- [ ] T-046: 生成各平台安装包 (msi / dmg / deb+AppImage)
-- [ ] T-047: 编写用户文档和 README
+- [x] T-044: 配置 GitHub Actions CI/CD (Windows / macOS / Linux) — release.yml workflow
+- [ ] T-045: 配置 Tauri Updater 自动更新（需要发布后配置 endpoint）
+- [x] T-046: 生成各平台安装包 (msi / dmg / deb+AppImage) — CI 自动构建
+- [x] T-047: 编写用户文档和 README
 
 ## P7: 能力联通 (Tool Execution) ✅ 2026-03-21
 
@@ -137,6 +137,15 @@
 - [x] T-087: 网页抓取工具 fetch_webpage（HTTP GET + HTML 去标签，用于文献/数据归纳）
 - [x] T-088: 桌面端 TaskPanel 显示工具调用过程（右侧面板，实时 agent-step 事件）
 
+## P12: Agent 智能升级 — 2026-03-28
+
+- [x] T-089: search_web 多引擎 fallback（Bing 中国可用优先 + DuckDuckGo 备选）
+- [x] T-090: 企业微信 Bot 接入（webhook_server 路由 + AES-CBC 消息解密 + 回复链路）
+- [x] T-091: 任务规划器 Planner（core/planner.rs, 复杂任务自动分解 + 反思 + 步骤控制）
+- [x] T-092: AgentEngine 集成 Planner（should_plan 启发式检测 + run_with_plan 多步执行）
+- [x] T-093: TaskPanel 展示任务计划（前端 plan 类型步骤渲染）
+- [x] T-094: GitHub Actions CI/CD（release.yml, Windows/macOS/Linux 三平台自动构建）
+
 ---
 
 ## 卡点记录
@@ -162,6 +171,7 @@
 | 2026-03-21 | T-062~T-066 | Qwen-VL多模态 + Settings密钥状态 + 配置合并保存 |
 | 2026-03-21 | T-067~T-074 | 鼠标键盘操控 + 飞书多会话 + Settings下拉/密钥预览 |
 | 2026-03-21 | T-075~T-081 | Vision槽位 + 定时监控 + /status增强 |
+| 2026-03-28 | T-089~T-094 | 搜索多引擎 + 企业微信接入 + 任务规划器 + CI/CD |
 
 ## 里程碑
 
@@ -172,4 +182,5 @@
 - ✅ 2026-03-21: P9 交互操控 + 多会话 + UI 优化
 - ✅ 2026-03-21: P10 路由 + 定时监控
 - ✅ 2026-03-21: P11 安全加固 + 工具补齐（审批拦截 + 快照 + 目录选择 + 网页抓取 + TaskPanel）
-- 🔲 下一步: P6 发布（CI/CD + 安装包）
+- ✅ 2026-03-28: P12 Agent 智能升级（搜索多引擎 + 企业微信 + 任务规划器 + CI/CD）
+- 🔲 下一步: T-045 Tauri Updater 配置、MCP 协议支持

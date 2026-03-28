@@ -1,13 +1,14 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { listen } from "@tauri-apps/api/event";
 import {
   Activity, CheckCircle2, XCircle, Clock, ChevronDown, ChevronRight,
   FileText, Terminal, Globe, Loader2,
 } from "lucide-react";
+import { useChatStore } from "../../stores/chatStore";
 
 interface TaskStep {
   id: string;
-  type: "thinking" | "tool_call" | "tool_result" | "response";
+  type: "thinking" | "tool_call" | "tool_result" | "response" | "plan";
   tool?: string;
   content: string;
   status: "running" | "done" | "error" | "blocked";
@@ -18,6 +19,17 @@ export function TaskPanel() {
   const [steps, setSteps] = useState<TaskStep[]>([]);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [isActive, setIsActive] = useState(false);
+  const conversationId = useChatStore((s) => s.conversationId);
+  const prevConvId = useRef(conversationId);
+
+  useEffect(() => {
+    if (prevConvId.current !== conversationId) {
+      setSteps([]);
+      setCollapsed(new Set());
+      setIsActive(false);
+      prevConvId.current = conversationId;
+    }
+  }, [conversationId]);
 
   useEffect(() => {
     const unlistenStep = listen<TaskStep>("agent-step", (event) => {
@@ -125,6 +137,7 @@ export function TaskPanel() {
                   {step.type === "thinking" && (step.status === "running" ? "思考中..." : "思考完成")}
                   {step.type === "tool_call" && `${step.tool || "工具"}`}
                   {step.type === "tool_result" && `${step.tool || "工具"} ✓`}
+                  {step.type === "plan" && "📋 任务计划"}
                   {step.type === "response" && "回复"}
                 </span>
                 <span className="text-[10px] shrink-0 tabular-nums" style={{ color: "var(--text-muted)" }}>
