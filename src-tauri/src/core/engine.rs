@@ -540,19 +540,39 @@ impl AgentEngine {
     ) -> String {
         use futures::StreamExt;
 
-        // Keep tool messages so the model can reference actual tool outputs accurately.
-        // Only strip the final assistant message if it has content (we're re-generating it as stream).
-        let clean_messages: Vec<ChatMessage> = messages.iter()
+        // Extract tool results as context, then build clean messages without tool protocol.
+        // This avoids API errors from providers that reject tool_calls without tools defined.
+        let mut tool_results: Vec<String> = Vec::new();
+        for m in messages {
+            if m.role == MessageRole::Tool {
+                let tool_name = m.name.as_deref().unwrap_or("tool");
+                let preview: String = m.content.chars().take(1500).collect();
+                tool_results.push(format!("[{}] {}", tool_name, preview));
+            }
+        }
+
+        let mut clean_messages: Vec<ChatMessage> = messages.iter()
             .filter(|m| {
-                // Remove the last assistant response (we'll re-generate it as a stream)
-                // but keep tool call/result pairs for context accuracy
-                if m.role == MessageRole::Assistant && !m.content.is_empty() && m.tool_calls.is_none() {
-                    return false;
-                }
+                if m.role == MessageRole::Tool { return false; }
+                if m.role == MessageRole::Assistant && m.content.is_empty() && m.tool_calls.is_some() { return false; }
+                if m.role == MessageRole::Assistant && !m.content.is_empty() && m.tool_calls.is_none() { return false; }
                 true
             })
             .cloned()
             .collect();
+
+        // Inject tool results as system context so the model can reference actual data
+        if !tool_results.is_empty() {
+            let context = format!(
+                "以下是工具调用返回的实际数据，请基于这些数据回答用户，不要编造：\n{}",
+                tool_results.join("\n")
+            );
+            clean_messages.insert(1.min(clean_messages.len()), ChatMessage {
+                role: MessageRole::System,
+                content: context,
+                name: None, tool_calls: None, tool_call_id: None,
+            });
+        }
 
         let req = ChatRequest {
             messages: clean_messages,
@@ -594,15 +614,26 @@ impl AgentEngine {
             }
             Err(e) => {
                 tracing::error!("[Engine] Stream init failed: {}, falling back to non-stream", e);
-                let clean_fallback: Vec<ChatMessage> = messages.iter()
+                let mut clean_fallback: Vec<ChatMessage> = messages.iter()
                     .filter(|m| {
-                        if m.role == MessageRole::Assistant && !m.content.is_empty() && m.tool_calls.is_none() {
-                            return false;
-                        }
+                        if m.role == MessageRole::Tool { return false; }
+                        if m.role == MessageRole::Assistant && m.content.is_empty() && m.tool_calls.is_some() { return false; }
+                        if m.role == MessageRole::Assistant && !m.content.is_empty() && m.tool_calls.is_none() { return false; }
                         true
                     })
                     .cloned()
                     .collect();
+                if !tool_results.is_empty() {
+                    let context = format!(
+                        "以下是工具调用返回的实际数据，请基于这些数据回答用户，不要编造：\n{}",
+                        tool_results.join("\n")
+                    );
+                    clean_fallback.insert(1.min(clean_fallback.len()), ChatMessage {
+                        role: MessageRole::System,
+                        content: context,
+                        name: None, tool_calls: None, tool_call_id: None,
+                    });
+                }
                 match self.provider.chat(ChatRequest {
                     messages: clean_fallback,
                     tools: None,

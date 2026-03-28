@@ -103,11 +103,22 @@ impl FeishuBot {
 
     pub async fn send_message(&mut self, user_open_id: &str, text: &str) -> Result<()> {
         let token = self.ensure_token().await?;
+        let md_text = markdown_to_feishu_md(text);
+
+        // Use post message with md tag for native Markdown rendering
+        let post_content = serde_json::json!({
+            "zh_cn": {
+                "content": [[{
+                    "tag": "md",
+                    "text": md_text
+                }]]
+            }
+        });
 
         let body = serde_json::json!({
             "receive_id": user_open_id,
-            "msg_type": "text",
-            "content": serde_json::json!({"text": text}).to_string(),
+            "msg_type": "post",
+            "content": post_content.to_string(),
         });
 
         let resp = self
@@ -119,8 +130,8 @@ impl FeishuBot {
             .await?;
 
         if !resp.status().is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            anyhow::bail!("Feishu send error: {}", body);
+            let resp_body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("Feishu send error: {}", resp_body);
         }
 
         Ok(())
@@ -155,5 +166,117 @@ impl FeishuBot {
             .unwrap_or(content);
 
         Some(parse_command(&text, &user_id, RemoteSource::Feishu))
+    }
+}
+
+/// Convert standard Markdown to Feishu md-tag compatible Markdown.
+///
+/// Feishu's post message `md` tag natively supports:
+/// - `**bold**`, `*italic*`, `***bold italic***`
+/// - `~~lineThrough~~`
+/// - `[text](url)` links
+/// - `> quote`
+/// - `- unordered list`, `1. ordered list`
+/// - ` ```code blocks``` `
+/// - ` --- ` horizontal rule
+///
+/// Only minimal conversion needed:
+/// - `## heading` → `**heading**` (Feishu md doesn't support # headings)
+fn markdown_to_feishu_md(md: &str) -> String {
+    let mut out = String::with_capacity(md.len());
+
+    for line in md.lines() {
+        let trimmed = line.trim();
+
+        // Convert headings to bold (Feishu md tag doesn't render # headings)
+        if let Some(rest) = trimmed.strip_prefix("### ") {
+            out.push_str(&format!("**{}**", rest.trim().replace("**", "")));
+            out.push('\n');
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("## ") {
+            out.push_str(&format!("**{}**", rest.trim().replace("**", "")));
+            out.push('\n');
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("# ") {
+            out.push_str(&format!("**{}**", rest.trim().replace("**", "")));
+            out.push('\n');
+            continue;
+        }
+
+        // Everything else passes through as-is (Feishu md supports it natively)
+        out.push_str(line);
+        out.push('\n');
+    }
+
+    while out.ends_with("\n\n\n") {
+        out.pop();
+    }
+    out.trim_end().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_md_preserves_bold() {
+        let md = "**结论**：BTC 价格为 **$66,161.68**";
+        let result = markdown_to_feishu_md(md);
+        assert!(result.contains("**结论**"), "Should preserve bold: {}", result);
+        assert!(result.contains("**$66,161.68**"), "Should preserve price: {}", result);
+    }
+
+    #[test]
+    fn test_md_preserves_list() {
+        let result = markdown_to_feishu_md("- 24小时最高：$68,955");
+        assert!(result.contains("- 24小时最高"), "Should preserve list: {}", result);
+    }
+
+    #[test]
+    fn test_md_heading_to_bold() {
+        assert_eq!(markdown_to_feishu_md("## 简要分析"), "**简要分析**");
+    }
+
+    #[test]
+    fn test_md_preserves_link() {
+        let result = markdown_to_feishu_md("查看 [Binance](https://binance.com)");
+        assert!(result.contains("[Binance](https://binance.com)"), "Should preserve: {}", result);
+    }
+
+    #[test]
+    fn test_md_preserves_quote() {
+        let result = markdown_to_feishu_md("> 数据来源：Binance API");
+        assert!(result.contains("> 数据来源"), "Should preserve quote: {}", result);
+    }
+
+    #[test]
+    fn test_md_preserves_strike() {
+        let result = markdown_to_feishu_md("~~已过期~~");
+        assert!(result.contains("~~已过期~~"), "Should preserve: {}", result);
+    }
+
+    #[test]
+    fn test_md_plain_text() {
+        let plain = "这是一段普通文本";
+        assert_eq!(markdown_to_feishu_md(plain), plain);
+    }
+
+    #[test]
+    fn test_md_full_btc() {
+        let md = "\
+**结论**：价格为 **$66,161.68**
+
+**关键数据**：
+- 24小时最高：$68,955.53
+- 24小时最低：$65,548.25
+
+> 数据来源：Binance API";
+
+        let result = markdown_to_feishu_md(md);
+        assert!(result.contains("**结论**"), "Bold preserved");
+        assert!(result.contains("- 24小时最高"), "List preserved");
+        assert!(result.contains("> 数据来源"), "Quote preserved");
     }
 }

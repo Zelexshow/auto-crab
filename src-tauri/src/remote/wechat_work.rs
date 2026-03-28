@@ -69,13 +69,14 @@ impl WechatWorkBot {
 
     pub async fn send_message(&mut self, user_id: &str, text: &str) -> Result<()> {
         let token = self.ensure_token().await?;
+        let clean = super::protocol::markdown_to_plain(text);
 
         let body = serde_json::json!({
             "touser": user_id,
             "msgtype": "text",
             "agentid": self.config.agent_id.parse::<i64>().unwrap_or(0),
             "text": {
-                "content": text,
+                "content": clean,
             },
         });
 
