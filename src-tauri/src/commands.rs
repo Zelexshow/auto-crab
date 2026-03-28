@@ -19,6 +19,47 @@ static DESKTOP_APPROVALS: std::sync::LazyLock<
     Mutex<HashMap<String, tokio::sync::oneshot::Sender<bool>>>,
 > = std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
+static SEARCH_CONFIG: std::sync::LazyLock<Mutex<config::SearchConfig>> =
+    std::sync::LazyLock::new(|| Mutex::new(config::SearchConfig::default()));
+
+/// Tracks monthly API usage: { "2026-03": { "serpapi": 42, "brave": 17 } }
+static SEARCH_USAGE: std::sync::LazyLock<Mutex<HashMap<String, HashMap<String, u32>>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+pub fn update_search_config(cfg: &config::SearchConfig) {
+    if let Ok(mut guard) = SEARCH_CONFIG.lock() {
+        *guard = cfg.clone();
+    }
+}
+
+fn current_month_key() -> String {
+    use std::time::SystemTime;
+    let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default();
+    let secs = now.as_secs();
+    // Approximate year-month from unix timestamp
+    let days = secs / 86400;
+    let years = days / 365;
+    let year = 1970 + years;
+    let remaining_days = days - years * 365;
+    let month = remaining_days / 30 + 1;
+    format!("{}-{:02}", year, month.min(12))
+}
+
+fn record_search_usage(provider: &str) {
+    let month_key = current_month_key();
+    if let Ok(mut guard) = SEARCH_USAGE.lock() {
+        let month_map = guard.entry(month_key).or_insert_with(HashMap::new);
+        *month_map.entry(provider.to_string()).or_insert(0) += 1;
+    }
+}
+
+fn get_search_usage(provider: &str) -> u32 {
+    let month_key = current_month_key();
+    SEARCH_USAGE.lock().ok()
+        .and_then(|g| g.get(&month_key).and_then(|m| m.get(provider).copied()))
+        .unwrap_or(0)
+}
+
 pub fn desktop_approvals() -> &'static Mutex<HashMap<String, tokio::sync::oneshot::Sender<bool>>> {
     &DESKTOP_APPROVALS
 }
@@ -90,10 +131,79 @@ pub async fn get_config(app: AppHandle) -> ApiResult<config::AppConfig> {
 
 #[tauri::command]
 pub async fn save_config(app: AppHandle, config_data: config::AppConfig) -> ApiResult<()> {
+    // Update global search config when config is saved
+    update_search_config(&config_data.search);
     match config::save_config(&app, &config_data).await {
         Ok(()) => ApiResult::ok(()),
         Err(e) => ApiResult::err(format!("Failed to save config: {}", e)),
     }
+}
+
+// ─── Skills file-based CRUD ───
+
+#[tauri::command]
+pub async fn list_skills(app: AppHandle) -> ApiResult<Vec<config::UserSkill>> {
+    let dir = config::skills_dir(&app);
+    let skills = config::load_skills_from_dir(&dir).await;
+    ApiResult::ok(skills)
+}
+
+#[tauri::command]
+pub async fn save_skill(app: AppHandle, skill: config::UserSkill) -> ApiResult<()> {
+    match config::save_single_skill(&app, &skill).await {
+        Ok(()) => ApiResult::ok(()),
+        Err(e) => ApiResult::err(format!("Failed to save skill: {}", e)),
+    }
+}
+
+#[tauri::command]
+pub async fn delete_skill(app: AppHandle, name: String) -> ApiResult<()> {
+    match config::delete_single_skill(&app, &name).await {
+        Ok(()) => ApiResult::ok(()),
+        Err(e) => ApiResult::err(format!("Failed to delete skill: {}", e)),
+    }
+}
+
+#[tauri::command]
+pub async fn rename_skill_cmd(app: AppHandle, old_name: String, new_name: String) -> ApiResult<()> {
+    match config::rename_skill(&app, &old_name, &new_name).await {
+        Ok(()) => ApiResult::ok(()),
+        Err(e) => ApiResult::err(format!("Failed to rename skill: {}", e)),
+    }
+}
+
+#[tauri::command]
+pub async fn get_skills_dir(app: AppHandle) -> ApiResult<String> {
+    let dir = config::skills_dir(&app);
+    ApiResult::ok(dir.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+pub async fn get_search_usage_stats() -> ApiResult<serde_json::Value> {
+    let cfg = SEARCH_CONFIG.lock().map(|g| g.clone()).unwrap_or_default();
+    let serpapi_used = get_search_usage("serpapi");
+    let brave_used = get_search_usage("brave");
+    let tavily_used = get_search_usage("tavily");
+    ApiResult::ok(serde_json::json!({
+        "serpapi": {
+            "used": serpapi_used,
+            "quota": cfg.serpapi_monthly_quota,
+            "remaining": cfg.serpapi_monthly_quota.saturating_sub(serpapi_used),
+            "configured": !cfg.serpapi_api_key.is_empty(),
+        },
+        "brave": {
+            "used": brave_used,
+            "quota": cfg.brave_monthly_quota,
+            "remaining": cfg.brave_monthly_quota.saturating_sub(brave_used),
+            "configured": !cfg.brave_api_key.is_empty(),
+        },
+        "tavily": {
+            "used": tavily_used,
+            "quota": cfg.tavily_monthly_quota,
+            "remaining": cfg.tavily_monthly_quota.saturating_sub(tavily_used),
+            "configured": !cfg.tavily_api_key.is_empty(),
+        }
+    }))
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -191,7 +301,7 @@ pub fn build_tool_definitions() -> Vec<ToolDefinition> {
 pub fn tool_operation_type(name: &str) -> &str {
     match name {
         "read_file" | "list_directory" | "fetch_webpage" | "read_pdf" => "read_file",
-        "search_web" | "get_crypto_price" => "search_web",
+        "search_web" | "get_crypto_price" | "get_market_price" => "search_web",
         "screenshot" | "analyze_screen" | "get_ui_tree" => "read_file",
         "focus_window" => "write_file",
         "write_file" => "write_file",
@@ -431,6 +541,13 @@ pub async fn dispatch_tool(tc: &ToolCall, file_ops: &FileOps, shell: &ShellExecu
             match fetch_crypto_price(&symbol).await {
                 Ok(info) => info,
                 Err(e) => format!("获取价格失败: {}", e),
+            }
+        }
+        "get_market_price" => {
+            let query = args["query"].as_str().unwrap_or("BTCUSDT");
+            match fetch_market_price(query).await {
+                Ok(info) => info,
+                Err(e) => format!("获取行情失败: {}", e),
             }
         }
         "quick_reply_wechat" => {
@@ -736,32 +853,286 @@ async fn do_key_press(key_str: &str) -> anyhow::Result<String> {
     .await?
 }
 
+pub async fn search_web_pub(query: &str) -> anyhow::Result<String> { search_web(query).await }
+
 async fn search_web(query: &str) -> anyhow::Result<String> {
-    // Try Bing first (accessible in China), then fallback to DuckDuckGo
-    match search_bing(query).await {
+    let cfg = SEARCH_CONFIG.lock().map(|g| g.clone()).unwrap_or_default();
+
+    // If API keys are configured, use them (fast, reliable, structured JSON)
+    let provider = cfg.provider.to_lowercase();
+
+    // Priority: Tavily (free 1000/mo) → SerpApi (free 250/mo) → Brave (free 1000/mo, overage billed)
+
+    // 1. Tavily — free 1000 credits/mo, AI-optimized results
+    if (provider == "tavily" || provider == "auto") && !cfg.tavily_api_key.is_empty() {
+        let used = get_search_usage("tavily");
+        if used < cfg.tavily_monthly_quota {
+            match search_tavily(query, &cfg.tavily_api_key).await {
+                Ok(results) if !results.is_empty() => {
+                    return Ok(format!("搜索 \"{}\" 的结果:\n\n{}", query, results));
+                }
+                Err(e) => tracing::warn!("Tavily search failed: {}", e),
+                _ => tracing::warn!("Tavily returned no results"),
+            }
+        } else {
+            tracing::warn!("Tavily quota exhausted ({}/{}), skipping", used, cfg.tavily_monthly_quota);
+        }
+    }
+
+    // 2. SerpApi (Google) — free 250/mo
+    if (provider == "serpapi" || provider == "auto") && !cfg.serpapi_api_key.is_empty() {
+        let used = get_search_usage("serpapi");
+        if used < cfg.serpapi_monthly_quota {
+            match search_serpapi(query, &cfg.serpapi_api_key).await {
+                Ok(results) if !results.is_empty() => {
+                    return Ok(format!("搜索 \"{}\" 的结果:\n\n{}", query, results));
+                }
+                Err(e) => tracing::warn!("SerpApi search failed: {}", e),
+                _ => tracing::warn!("SerpApi returned no results"),
+            }
+        } else {
+            tracing::warn!("SerpApi quota exhausted ({}/{}), skipping", used, cfg.serpapi_monthly_quota);
+        }
+    }
+
+    // 3. Brave Search — free 1000/mo but overage incurs charges
+    if (provider == "brave" || provider == "auto") && !cfg.brave_api_key.is_empty() {
+        let used = get_search_usage("brave");
+        if used < cfg.brave_monthly_quota {
+            match search_brave(query, &cfg.brave_api_key).await {
+                Ok(results) if !results.is_empty() => {
+                    return Ok(format!("搜索 \"{}\" 的结果:\n\n{}", query, results));
+                }
+                Err(e) => tracing::warn!("Brave search failed: {}", e),
+                _ => tracing::warn!("Brave returned no results"),
+            }
+        } else {
+            tracing::warn!("Brave quota exhausted ({}/{}), skipping", used, cfg.brave_monthly_quota);
+        }
+    }
+
+    // Fallback: free scraping-based engines (no API key needed)
+    match search_duckduckgo(query).await {
         Ok(results) if !results.is_empty() => {
             return Ok(format!("搜索 \"{}\" 的结果:\n\n{}", query, results));
         }
-        Err(e) => tracing::warn!("Bing search failed: {}, trying DuckDuckGo", e),
-        _ => tracing::warn!("Bing returned no results, trying DuckDuckGo"),
+        Err(e) => tracing::warn!("DuckDuckGo search failed: {}, trying SearXNG", e),
+        _ => tracing::warn!("DuckDuckGo returned no results, trying SearXNG"),
     }
 
-    match search_duckduckgo(query).await {
+    match search_searxng(query).await {
         Ok(results) if !results.is_empty() => {
-            Ok(format!("搜索 \"{}\" 的结果:\n\n{}", query, results))
+            return Ok(format!("搜索 \"{}\" 的结果:\n\n{}", query, results));
         }
-        Ok(_) => anyhow::bail!("未找到搜索结果"),
-        Err(e) => anyhow::bail!("搜索失败: {}", e),
+        Err(e) => tracing::warn!("SearXNG search failed: {}", e),
+        _ => tracing::warn!("SearXNG returned no results"),
     }
+
+    anyhow::bail!("搜索失败：所有搜索引擎均不可用，可尝试 fetch_webpage 直接访问目标网站")
+}
+
+/// SerpApi — Google Search scraping API, free 250/month
+async fn search_serpapi(query: &str, api_key: &str) -> anyhow::Result<String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()?;
+
+    let url = format!(
+        "https://serpapi.com/search?engine=google&q={}&api_key={}&num=8&output=json",
+        urlencoding::encode(query),
+        api_key,
+    );
+
+    let resp = client.get(&url)
+        .send().await?;
+
+    if !resp.status().is_success() {
+        anyhow::bail!("SerpApi error: {}", resp.status());
+    }
+
+    record_search_usage("serpapi");
+    let data: serde_json::Value = resp.json().await?;
+    let mut results = Vec::new();
+
+    if let Some(answer_box) = data["answer_box"]["answer"].as_str() {
+        if !answer_box.is_empty() {
+            results.push(format!("直接答案: {}", answer_box));
+        }
+    } else if let Some(snippet) = data["answer_box"]["snippet"].as_str() {
+        if !snippet.is_empty() {
+            results.push(format!("精选摘要: {}", snippet));
+        }
+    }
+
+    if let Some(arr) = data["organic_results"].as_array() {
+        for item in arr.iter().take(8) {
+            let title = item["title"].as_str().unwrap_or("").trim();
+            let link = item["link"].as_str().unwrap_or("");
+            let snippet = item["snippet"].as_str().unwrap_or("").trim();
+            if !title.is_empty() && !link.is_empty() {
+                results.push(format!("{}. {}\n   {}\n   {}",
+                    results.len() + 1, title,
+                    snippet.chars().take(200).collect::<String>(), link));
+            }
+        }
+    }
+
+    if results.is_empty() {
+        anyhow::bail!("SerpApi 未返回结果")
+    }
+    Ok(results.join("\n\n"))
+}
+
+/// Brave Search API — generous free tier (2000/month), global results
+async fn search_brave(query: &str, api_key: &str) -> anyhow::Result<String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()?;
+
+    let url = format!("https://api.search.brave.com/res/v1/web/search?q={}&count=8",
+        urlencoding::encode(query));
+
+    let resp = client.get(&url)
+        .header("Accept", "application/json")
+        .header("Accept-Encoding", "gzip")
+        .header("X-Subscription-Token", api_key)
+        .send().await?;
+
+    if !resp.status().is_success() {
+        anyhow::bail!("Brave API error: {}", resp.status());
+    }
+
+    record_search_usage("brave");
+    let data: serde_json::Value = resp.json().await?;
+    let mut results = Vec::new();
+
+    if let Some(arr) = data["web"]["results"].as_array() {
+        for item in arr.iter().take(8) {
+            let title = item["title"].as_str().unwrap_or("").trim();
+            let url = item["url"].as_str().unwrap_or("");
+            let desc = item["description"].as_str().unwrap_or("").trim();
+            if !title.is_empty() && !url.is_empty() {
+                results.push(format!("{}. {}\n   {}\n   {}",
+                    results.len() + 1, title,
+                    desc.chars().take(200).collect::<String>(), url));
+            }
+        }
+    }
+
+    if results.is_empty() {
+        anyhow::bail!("Brave 未返回结果")
+    }
+    Ok(results.join("\n\n"))
+}
+
+/// Tavily Search API — AI-agent-optimized search, free 1000 credits/month
+async fn search_tavily(query: &str, api_key: &str) -> anyhow::Result<String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()?;
+
+    let body = serde_json::json!({
+        "query": query,
+        "search_depth": "basic",
+        "max_results": 8,
+        "include_answer": true,
+    });
+
+    let resp = client.post("https://api.tavily.com/search")
+        .header("Authorization", format!("Bearer {}", api_key))
+        .json(&body)
+        .send().await?;
+
+    if !resp.status().is_success() {
+        anyhow::bail!("Tavily API error: {}", resp.status());
+    }
+
+    record_search_usage("tavily");
+    let data: serde_json::Value = resp.json().await?;
+    let mut results = Vec::new();
+
+    if let Some(answer) = data["answer"].as_str() {
+        if !answer.is_empty() {
+            results.push(format!("AI 摘要: {}", answer));
+        }
+    }
+
+    if let Some(arr) = data["results"].as_array() {
+        for item in arr.iter().take(8) {
+            let title = item["title"].as_str().unwrap_or("").trim();
+            let url = item["url"].as_str().unwrap_or("");
+            let content = item["content"].as_str().unwrap_or("").trim();
+            if !title.is_empty() && !url.is_empty() {
+                results.push(format!("{}. {}\n   {}\n   {}",
+                    results.len() + 1, title,
+                    content.chars().take(200).collect::<String>(), url));
+            }
+        }
+    }
+
+    if results.is_empty() {
+        anyhow::bail!("Tavily 未返回结果")
+    }
+    Ok(results.join("\n\n"))
+}
+
+/// SearXNG — open-source meta-search engine with JSON API (aggregates Google/Bing/etc.)
+async fn search_searxng(query: &str) -> anyhow::Result<String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+        .build()?;
+
+    // Try multiple public SearXNG instances
+    let instances = [
+        "https://search.sapti.me",
+        "https://searx.be",
+        "https://search.bus-hit.me",
+        "https://searxng.site",
+    ];
+
+    for instance in &instances {
+        let url = format!("{}/search?q={}&format=json&categories=general&language=en",
+            instance, urlencoding::encode(query));
+        match client.get(&url).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                if let Ok(text) = resp.text().await {
+                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
+                        if let Some(arr) = json["results"].as_array() {
+                            let mut results = Vec::new();
+                            for item in arr.iter().take(8) {
+                                let title = item["title"].as_str().unwrap_or("").trim();
+                                let url = item["url"].as_str().unwrap_or("");
+                                let content = item["content"].as_str().unwrap_or("").trim();
+                                if !title.is_empty() && !url.is_empty() {
+                                    results.push(format!("{}. {}\n   {}\n   {}",
+                                        results.len() + 1, title,
+                                        content.chars().take(200).collect::<String>(), url));
+                                }
+                            }
+                            if !results.is_empty() {
+                                return Ok(results.join("\n\n"));
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(_) => continue,
+            Err(_) => continue,
+        }
+    }
+
+    anyhow::bail!("SearXNG 所有实例均不可用")
 }
 
 async fn search_bing(query: &str) -> anyhow::Result<String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
-        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
         .build()?;
 
-    let url = format!("https://cn.bing.com/search?q={}&ensearch=0", urlencoding::encode(query));
+    // Use international Bing for global results, with ensearch=1
+    let url = format!("https://www.bing.com/search?q={}&ensearch=1", urlencoding::encode(query));
     let resp = client.get(&url).send().await?;
     let html = resp.text().await?;
 
@@ -849,14 +1220,35 @@ async fn search_duckduckgo(query: &str) -> anyhow::Result<String> {
     let mut results = Vec::new();
     let mut pos = 0;
 
-    for _ in 0..8 {
+    for _ in 0..12 {
         if let Some(start) = html[pos..].find("class=\"result__a\"") {
             let abs = pos + start;
             if let Some(href_start) = html[abs..].find("href=\"") {
                 let href_abs = abs + href_start + 6;
                 if let Some(href_end) = html[href_abs..].find('"') {
-                    let url = &html[href_abs..href_abs + href_end];
-                    let url = url.replace("&amp;", "&");
+                    let raw_url = html[href_abs..href_abs + href_end].replace("&amp;", "&");
+
+                    // DuckDuckGo wraps results in redirect URLs like //duckduckgo.com/l/?uddg=https%3A...
+                    let final_url = if raw_url.contains("uddg=") {
+                        if let Some(uddg_start) = raw_url.find("uddg=") {
+                            let encoded = &raw_url[uddg_start + 5..];
+                            let end = encoded.find('&').unwrap_or(encoded.len());
+                            urlencoding::decode(&encoded[..end])
+                                .map(|s| s.to_string())
+                                .unwrap_or(encoded[..end].to_string())
+                        } else { raw_url.clone() }
+                    } else if raw_url.starts_with("http") {
+                        raw_url.clone()
+                    } else {
+                        pos = href_abs + href_end + 1;
+                        continue;
+                    };
+
+                    // Skip ad redirect URLs
+                    if final_url.contains("duckduckgo.com/y.js") {
+                        pos = href_abs + href_end + 1;
+                        continue;
+                    }
 
                     let title_start = html[href_abs + href_end..].find('>').map(|i| href_abs + href_end + i + 1).unwrap_or(0);
                     let title_end = html[title_start..].find('<').map(|i| title_start + i).unwrap_or(title_start);
@@ -871,10 +1263,11 @@ async fn search_duckduckgo(query: &str) -> anyhow::Result<String> {
                         } else { String::new() }
                     } else { String::new() };
 
-                    if !title.is_empty() && !url.starts_with("/") {
-                        results.push(format!("{}. {}\n   {}\n   {}", results.len() + 1, title, snippet, url));
+                    if !title.is_empty() && !final_url.is_empty() {
+                        results.push(format!("{}. {}\n   {}\n   {}", results.len() + 1, title, snippet, final_url));
                     }
                     pos = title_end;
+                    if results.len() >= 8 { break; }
                 } else { break; }
             } else { break; }
         } else { break; }
@@ -1127,6 +1520,323 @@ async fn read_pdf_text(path: &str, _max_pages: usize) -> anyhow::Result<String> 
 
 pub async fn fetch_crypto_price_pub(symbol: &str) -> anyhow::Result<String> { fetch_crypto_price(symbol).await }
 
+/// Unified market data entry point. Detects market type from the query and fetches accordingly.
+pub async fn fetch_market_price_pub(query: &str) -> anyhow::Result<String> {
+    fetch_market_price(query).await
+}
+
+async fn fetch_market_price(query: &str) -> anyhow::Result<String> {
+    let mut asset = parse_asset_query(query);
+
+    // Dynamic search: resolve unknown symbols via Tencent smartbox search API
+    if asset.symbol.starts_with("__SEARCH__") {
+        let keyword = &asset.symbol[10..];
+        match search_stock_symbol(keyword).await {
+            Ok(resolved) => {
+                asset = resolved;
+            }
+            Err(_) => {
+                // Last resort: try as crypto
+                let sym = format!("{}USDT", keyword.to_uppercase());
+                asset = AssetQuery { market: MarketType::Crypto, symbol: sym, display_name: keyword.to_string() };
+            }
+        }
+    }
+
+    match asset.market {
+        MarketType::Crypto => fetch_crypto_price(&asset.symbol).await,
+        MarketType::CNStock => fetch_cn_stock(&asset.symbol, &asset.display_name).await,
+        MarketType::HKStock => fetch_hk_stock(&asset.symbol, &asset.display_name).await,
+        MarketType::USStock => fetch_us_stock(&asset.symbol, &asset.display_name).await,
+        MarketType::JPStock => fetch_jp_stock(&asset.symbol, &asset.display_name).await,
+        MarketType::Commodity => fetch_commodity(&asset.symbol, &asset.display_name).await,
+        MarketType::Forex => fetch_forex(&asset.symbol, &asset.display_name).await,
+    }
+}
+
+/// Search for a stock symbol by name/keyword using Tencent smartbox API.
+/// Returns the best matching AssetQuery.
+async fn search_stock_symbol(keyword: &str) -> anyhow::Result<AssetQuery> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .build()?;
+
+    let encoded = urlencoding::encode(keyword);
+    let url = format!(
+        "https://smartbox.gtimg.cn/s3/?v=2&q={}&t=all&c=1",
+        encoded
+    );
+
+    let resp = client
+        .get(&url)
+        .header("Referer", "https://finance.qq.com")
+        .send()
+        .await?;
+
+    let text = resp.text().await?;
+    // Response format: v_hint="code~name~market~...^code2~name2~..."
+    let start = text.find('"').unwrap_or(0) + 1;
+    let end = text.rfind('"').unwrap_or(text.len());
+    if start >= end {
+        anyhow::bail!("搜索无结果: {}", keyword);
+    }
+
+    let content = &text[start..end];
+    // Parse the first result
+    let first = content.split('^').next().unwrap_or("");
+    let fields: Vec<&str> = first.split('~').collect();
+
+    if fields.len() < 3 {
+        anyhow::bail!("未找到匹配的标的: {}", keyword);
+    }
+
+    let code = fields[0];
+    let name = fields[1];
+    let market_hint = if fields.len() > 2 { fields[2] } else { "" };
+
+    // Determine market from the code prefix / market hint
+    let (market, symbol) = if code.starts_with("sh") || code.starts_with("sz") {
+        (MarketType::CNStock, code.to_string())
+    } else if code.starts_with("hk") {
+        (MarketType::HKStock, code.to_string())
+    } else if code.starts_with("us") {
+        (MarketType::USStock, code.to_string())
+    } else if market_hint.contains("us") || market_hint.contains("US") {
+        (MarketType::USStock, format!("us{}", code))
+    } else if market_hint.contains("hk") || market_hint.contains("HK") {
+        (MarketType::HKStock, format!("hk{}", code))
+    } else if code.starts_with('6') || code.starts_with("00") || code.starts_with("30") || code.starts_with("68") {
+        // Likely A-share
+        let prefix = if code.starts_with('6') || code.starts_with("68") { "sh" } else { "sz" };
+        (MarketType::CNStock, format!("{}{}", prefix, code))
+    } else {
+        // Default to US stock
+        (MarketType::USStock, format!("us{}", code.to_uppercase()))
+    };
+
+    Ok(AssetQuery {
+        market,
+        symbol,
+        display_name: name.to_string(),
+    })
+}
+
+#[derive(Debug, Clone)]
+enum MarketType { Crypto, CNStock, HKStock, USStock, JPStock, Commodity, Forex }
+
+#[derive(Debug, Clone)]
+struct AssetQuery {
+    market: MarketType,
+    symbol: String,
+    display_name: String,
+}
+
+fn parse_asset_query(query: &str) -> AssetQuery {
+    let q = query.trim();
+    let lower = q.to_lowercase();
+
+    // Commodity detection — use multiple API identifiers: "sina_symbol|tencent_symbol"
+    let commodity_map: Vec<(&str, &str, &str)> = vec![
+        ("黄金", "hf_GC|AUTD", "黄金"),
+        ("gold", "hf_GC|AUTD", "Gold"),
+        ("xauusd", "hf_GC|AUTD", "黄金"),
+        ("xau", "hf_GC|AUTD", "黄金"),
+        ("白银", "hf_SI|AGTD", "白银"),
+        ("silver", "hf_SI|AGTD", "Silver"),
+        ("xagusd", "hf_SI|AGTD", "白银"),
+        ("xag", "hf_SI|AGTD", "白银"),
+        ("原油", "hf_CL|usOIL", "原油(WTI)"),
+        ("crude", "hf_CL|usOIL", "Crude Oil(WTI)"),
+        ("wti", "hf_CL|usOIL", "原油(WTI)"),
+        ("brent", "hf_OIL|ukOIL", "布伦特原油"),
+        ("天然气", "hf_NG|usNG", "天然气"),
+        ("铜", "hf_HG|usCU", "铜(COMEX)"),
+        ("copper", "hf_HG|usCU", "Copper(COMEX)"),
+    ];
+    for (kw, sym, name) in &commodity_map {
+        if lower.contains(kw) {
+            return AssetQuery { market: MarketType::Commodity, symbol: sym.to_string(), display_name: name.to_string() };
+        }
+    }
+
+    // Forex detection — also with fallback symbols
+    let forex_map: Vec<(&str, &str, &str)> = vec![
+        ("美元指数", "dxy|UDI", "美元指数(DXY)"),
+        ("usdcny", "fx_susdcny|USDCNY", "美元/人民币"),
+        ("美元人民币", "fx_susdcny|USDCNY", "美元/人民币"),
+        ("离岸人民币", "fx_susdcnh|USDCNH", "美元/离岸人民币"),
+        ("eurusd", "fx_seurusd|EURUSD", "欧元/美元"),
+        ("usdjpy", "fx_susdjpy|USDJPY", "美元/日元"),
+        ("gbpusd", "fx_sgbpusd|GBPUSD", "英镑/美元"),
+    ];
+    for (kw, sym, name) in &forex_map {
+        if lower.contains(kw) {
+            return AssetQuery { market: MarketType::Forex, symbol: sym.to_string(), display_name: name.to_string() };
+        }
+    }
+
+    // A-share detection: sh/sz prefix, 6-digit code, or Chinese stock names
+    let cn_stocks: Vec<(&str, &str, &str)> = vec![
+        ("茅台", "sh600519", "贵州茅台"),
+        ("平安", "sh601318", "中国平安"),
+        ("招行", "sh600036", "招商银行"),
+        ("宁德", "sz300750", "宁德时代"),
+        ("比亚迪a", "sz002594", "比亚迪"),
+        ("中信", "sh600030", "中信证券"),
+        ("万科", "sz000002", "万科A"),
+        ("五粮液", "sz000858", "五粮液"),
+        ("上证指数", "sh000001", "上证指数"),
+        ("沪深300", "sh000300", "沪深300"),
+        ("创业板", "sz399006", "创业板指"),
+        ("深证成指", "sz399001", "深证成指"),
+    ];
+    for (kw, sym, name) in &cn_stocks {
+        if lower.contains(kw) {
+            return AssetQuery { market: MarketType::CNStock, symbol: sym.to_string(), display_name: name.to_string() };
+        }
+    }
+    // Generic A-share code pattern: sh600xxx, sz000xxx, sz300xxx, sh688xxx, etc.
+    if let Some(code) = extract_cn_stock_code(&lower) {
+        let name = code.to_uppercase();
+        return AssetQuery { market: MarketType::CNStock, symbol: code, display_name: name };
+    }
+
+    // HK stock detection
+    let hk_stocks: Vec<(&str, &str, &str)> = vec![
+        ("腾讯", "hk00700", "腾讯控股"),
+        ("阿里", "hk09988", "阿里巴巴-W"),
+        ("美团", "hk03690", "美团-W"),
+        ("小米", "hk01810", "小米集团-W"),
+        ("恒生指数", "hkHSI", "恒生指数"),
+        ("恒指", "hkHSI", "恒生指数"),
+        ("港股", "hkHSI", "恒生指数"),
+        ("京东港", "hk09618", "京东集团-SW"),
+        ("百度港", "hk09888", "百度集团-SW"),
+        ("网易港", "hk09999", "网易-S"),
+    ];
+    for (kw, sym, name) in &hk_stocks {
+        if lower.contains(kw) {
+            return AssetQuery { market: MarketType::HKStock, symbol: sym.to_string(), display_name: name.to_string() };
+        }
+    }
+    if let Some(code) = extract_hk_stock_code(&lower) {
+        let name = code.to_uppercase();
+        return AssetQuery { market: MarketType::HKStock, symbol: code, display_name: name };
+    }
+
+    // JP stock detection
+    let jp_stocks: Vec<(&str, &str, &str)> = vec![
+        ("日经", "b_N225", "日经225"),
+        ("nikkei", "b_N225", "日经225指数"),
+        ("丰田", "b_7203", "丰田汽车"),
+        ("索尼", "b_6758", "索尼"),
+        ("任天堂", "b_7974", "任天堂"),
+        ("日股", "b_N225", "日经225"),
+    ];
+    for (kw, sym, name) in &jp_stocks {
+        if lower.contains(kw) {
+            return AssetQuery { market: MarketType::JPStock, symbol: sym.to_string(), display_name: name.to_string() };
+        }
+    }
+
+    // US stock detection
+    let us_stocks: Vec<(&str, &str, &str)> = vec![
+        ("苹果", "usAAPL", "Apple(AAPL)"),
+        ("特斯拉", "usTSLA", "Tesla(TSLA)"),
+        ("英伟达", "usNVDA", "NVIDIA(NVDA)"),
+        ("微软", "usMSFT", "Microsoft(MSFT)"),
+        ("谷歌", "usGOOGL", "Alphabet(GOOGL)"),
+        ("亚马逊", "usAMZN", "Amazon(AMZN)"),
+        ("meta", "usMETA", "Meta(META)"),
+        ("标普", "b_GSPC", "标普500"),
+        ("纳斯达克", "b_IXIC", "纳斯达克综合"),
+        ("纳指", "b_IXIC", "纳斯达克综合"),
+        ("道琼斯", "b_DJI", "道琼斯工业"),
+        ("道指", "b_DJI", "道琼斯工业"),
+        ("美股", "b_GSPC", "标普500"),
+    ];
+    for (kw, sym, name) in &us_stocks {
+        if lower.contains(kw) {
+            return AssetQuery { market: MarketType::USStock, symbol: sym.to_string(), display_name: name.to_string() };
+        }
+    }
+    // Generic US stock ticker: "AAPL", "TSLA", etc. - uppercase 1-5 letter codes
+    if let Some(ticker) = extract_us_ticker(q) {
+        let sym = format!("us{}", ticker);
+        return AssetQuery { market: MarketType::USStock, symbol: sym, display_name: ticker.to_string() };
+    }
+
+    // Default: try as crypto if it looks like one, otherwise mark for dynamic search
+    if lower.contains("usdt") || lower.contains("btc") || lower.contains("eth") {
+        let sym = if lower.contains("usdt") { q.to_uppercase() } else { format!("{}USDT", q.to_uppercase()) };
+        return AssetQuery { market: MarketType::Crypto, symbol: sym, display_name: q.to_string() };
+    }
+
+    // Fallback: dynamic search — symbol will be resolved at fetch time
+    AssetQuery { market: MarketType::CNStock, symbol: format!("__SEARCH__{}", q), display_name: q.to_string() }
+}
+
+fn extract_cn_stock_code(text: &str) -> Option<String> {
+    use regex::Regex;
+    // Match "sh600519", "sz300750", "SH.600519", "600519.SH"
+    if let Ok(re) = Regex::new(r"(?i)(sh|sz)\s*\.?\s*(\d{6})") {
+        if let Some(cap) = re.captures(text) {
+            return Some(format!("{}{}", &cap[1].to_lowercase(), &cap[2]));
+        }
+    }
+    if let Ok(re) = Regex::new(r"(\d{6})\s*\.?\s*(?i)(sh|sz)") {
+        if let Some(cap) = re.captures(text) {
+            return Some(format!("{}{}", &cap[2].to_lowercase(), &cap[1]));
+        }
+    }
+    // Bare 6-digit code starting with 6(SH), 0/3(SZ)
+    if let Ok(re) = Regex::new(r"\b(6\d{5})\b") {
+        if let Some(cap) = re.captures(text) {
+            return Some(format!("sh{}", &cap[1]));
+        }
+    }
+    if let Ok(re) = Regex::new(r"\b([03]\d{5})\b") {
+        if let Some(cap) = re.captures(text) {
+            return Some(format!("sz{}", &cap[1]));
+        }
+    }
+    None
+}
+
+fn extract_hk_stock_code(text: &str) -> Option<String> {
+    use regex::Regex;
+    // "hk00700", "HK.00700", "00700.HK"
+    if let Ok(re) = Regex::new(r"(?i)hk\s*\.?\s*(\d{5})") {
+        if let Some(cap) = re.captures(text) {
+            return Some(format!("hk{}", &cap[1]));
+        }
+    }
+    if let Ok(re) = Regex::new(r"(\d{5})\s*\.?\s*(?i)hk") {
+        if let Some(cap) = re.captures(text) {
+            return Some(format!("hk{}", &cap[1]));
+        }
+    }
+    None
+}
+
+fn extract_us_ticker(text: &str) -> Option<String> {
+    use regex::Regex;
+    // Match standalone uppercase 1-5 letter tickers like "AAPL", "TSLA"
+    // Exclude common English words
+    let exclude = ["THE", "AND", "FOR", "NOT", "YOU", "ALL", "CAN", "HER", "WAS", "ONE", "OUR", "OUT", "ARE", "HAS", "HIS", "HOW", "ITS", "LET", "MAY", "NEW", "NOW", "OLD", "SEE", "WAY", "WHO", "DID", "GET", "GOT", "HAD", "SAY", "SHE", "TOO", "USE", "MIN", "MAX", "BTC", "ETH", "SOL", "BNB", "XRP"];
+    if let Ok(re) = Regex::new(r"\b([A-Z]{1,5})\b") {
+        for cap in re.captures_iter(text) {
+            let ticker = &cap[1];
+            if !exclude.contains(&ticker) && ticker.len() >= 2 {
+                return Some(ticker.to_string());
+            }
+        }
+    }
+    None
+}
+
+// ── Fetch functions for each market ──
+
 async fn fetch_crypto_price(symbol: &str) -> anyhow::Result<String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
@@ -1170,6 +1880,332 @@ async fn fetch_crypto_price(symbol: &str) -> anyhow::Result<String> {
         volume, &symbol[..symbol.len().saturating_sub(4)],
         format_volume(quote_vol),
     ))
+}
+
+/// A-shares via Tencent Stock API (qt.gtimg.cn), accessible from mainland China
+async fn fetch_cn_stock(symbol: &str, display: &str) -> anyhow::Result<String> {
+    let data = fetch_tencent_stock(symbol).await?;
+    format_tencent_stock(&data, display, "A股", "腾讯股票API")
+}
+
+/// HK stocks via Tencent Stock API
+async fn fetch_hk_stock(symbol: &str, display: &str) -> anyhow::Result<String> {
+    let data = fetch_tencent_stock(symbol).await?;
+    format_tencent_stock(&data, display, "港股", "腾讯股票API")
+}
+
+/// US stocks via Tencent Stock API
+async fn fetch_us_stock(symbol: &str, display: &str) -> anyhow::Result<String> {
+    // For index codes starting with "b_", use Sina Finance
+    if symbol.starts_with("b_") {
+        return fetch_sina_index(symbol, display).await;
+    }
+    let data = fetch_tencent_stock(symbol).await?;
+    format_tencent_stock(&data, display, "美股", "腾讯股票API")
+}
+
+/// JP stocks via Sina Finance (international indices/stocks)
+async fn fetch_jp_stock(symbol: &str, display: &str) -> anyhow::Result<String> {
+    fetch_sina_index(symbol, display).await
+}
+
+/// Commodity: Tencent SGE (stable) → Sina futures → error
+async fn fetch_commodity(symbol: &str, display: &str) -> anyhow::Result<String> {
+    let parts: Vec<&str> = symbol.split('|').collect();
+    let sina_sym = parts.first().unwrap_or(&symbol);
+    let tencent_sym = parts.get(1).copied();
+
+    // Primary: Tencent / Shanghai Gold Exchange (more stable)
+    if let Some(tc) = tencent_sym {
+        if let Ok(result) = fetch_commodity_tencent(tc, display).await {
+            return Ok(result);
+        }
+    }
+
+    // Fallback: Sina futures
+    if let Ok(result) = fetch_sina_futures(sina_sym, display).await {
+        return Ok(result);
+    }
+
+    anyhow::bail!("{} 获取失败：所有数据源均不可用", display)
+}
+
+/// Forex: frankfurter (stable, global) → Sina → error
+async fn fetch_forex(symbol: &str, display: &str) -> anyhow::Result<String> {
+    let parts: Vec<&str> = symbol.split('|').collect();
+    let sina_sym = parts.first().unwrap_or(&symbol);
+    let fallback_sym = parts.get(1).copied();
+
+    // Primary: frankfurter.app (free, no key, stable)
+    if let Some(fb) = fallback_sym {
+        if let Ok(result) = fetch_forex_fallback(fb, display).await {
+            return Ok(result);
+        }
+    }
+
+    // Fallback: Sina
+    if let Ok(result) = fetch_sina_futures(sina_sym, display).await {
+        return Ok(result);
+    }
+
+    anyhow::bail!("{} 获取失败：所有数据源均不可用", display)
+}
+
+/// Primary commodity source: Shanghai Gold Exchange via Tencent (stable)
+async fn fetch_commodity_tencent(symbol: &str, display: &str) -> anyhow::Result<String> {
+    let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(10)).build()?;
+
+    let tencent_map: std::collections::HashMap<&str, &str> = [
+        ("AUTD", "nf_AU9999"),
+        ("AGTD", "nf_AG9999"),
+    ].into();
+
+    if let Some(tc_sym) = tencent_map.get(symbol) {
+        let url = format!("https://qt.gtimg.cn/q={}", tc_sym);
+        let resp = client.get(&url).header("Referer", "https://finance.qq.com").send().await?;
+        let text = resp.text().await?;
+        let start = text.find('"').unwrap_or(0) + 1;
+        let end = text.rfind('"').unwrap_or(text.len());
+        if end > start {
+            let fields: Vec<&str> = text[start..end].split('~').collect();
+            if fields.len() > 33 {
+                let name = fields.get(1).unwrap_or(&display);
+                let price = fields.get(3).unwrap_or(&"--");
+                let change = fields.get(31).unwrap_or(&"--");
+                let change_pct = fields.get(32).unwrap_or(&"--");
+                return Ok(format!("{} | 价格: {} 元/克 | 涨跌: {} ({}%) | 来源: 上海黄金交易所",
+                    name, price, change, change_pct));
+            }
+        }
+    }
+
+    anyhow::bail!("{} Tencent fallback 无数据", symbol)
+}
+
+/// Fallback for forex: frankfurter.app (free, no API key)
+async fn fetch_forex_fallback(symbol: &str, display: &str) -> anyhow::Result<String> {
+    let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(10)).build()?;
+
+    let forex_pairs: std::collections::HashMap<&str, (&str, &str)> = [
+        ("USDCNY", ("USD", "CNY")), ("USDCNH", ("USD", "CNY")),
+        ("EURUSD", ("EUR", "USD")), ("USDJPY", ("USD", "JPY")),
+        ("GBPUSD", ("GBP", "USD")), ("UDI", ("USD", "EUR")),
+    ].into();
+
+    if let Some((from, to)) = forex_pairs.get(symbol) {
+        let url = format!("https://api.frankfurter.app/latest?from={}&to={}", from, to);
+        let resp = client.get(&url).send().await?;
+        let text = resp.text().await?;
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
+            if let Some(rate) = json["rates"][to].as_f64() {
+                return Ok(format!("{} | 汇率: {:.4} {}/{} | 来源: frankfurter.app", display, rate, from, to));
+            }
+        }
+    }
+
+    anyhow::bail!("{} forex fallback 无数据", display)
+}
+
+/// Fetch from Tencent stock API - covers A-shares, HK, US stocks
+async fn fetch_tencent_stock(symbol: &str) -> anyhow::Result<Vec<String>> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()?;
+
+    let url = format!("https://qt.gtimg.cn/q={}", symbol);
+    let resp = client
+        .get(&url)
+        .header("Referer", "https://finance.qq.com")
+        .send()
+        .await?;
+
+    let text = resp.text().await?;
+    // Response format: v_shXXXXXX="1~名称~代码~价格~...";
+    let start = text.find('"').unwrap_or(0) + 1;
+    let end = text.rfind('"').unwrap_or(text.len());
+    if start >= end {
+        anyhow::bail!("无法解析腾讯股票数据: {}", &text[..text.len().min(200)]);
+    }
+    let fields: Vec<String> = text[start..end].split('~').map(|s| s.to_string()).collect();
+    if fields.len() < 10 {
+        anyhow::bail!("数据字段不足: 仅{}个字段", fields.len());
+    }
+    Ok(fields)
+}
+
+/// Format Tencent stock data into readable text.
+/// Fields: 0=market, 1=name, 2=code, 3=current price, 4=yesterday close,
+///         5=open, 6=volume(hands), 7=outer, 8=inner, 9=buy1 price, ...
+///         31=high, 32=low, 33=change%, ...
+fn format_tencent_stock(fields: &[String], display: &str, market: &str, source: &str) -> anyhow::Result<String> {
+    let name = if !fields[1].is_empty() { &fields[1] } else { display };
+    let current = &fields[3];
+    let yesterday_close = &fields[4];
+    let open = &fields[5];
+
+    let high = if fields.len() > 33 { &fields[33] } else if fields.len() > 31 { &fields[31] } else { "N/A" };
+    let low = if fields.len() > 34 { &fields[34] } else if fields.len() > 32 { &fields[32] } else { "N/A" };
+    let volume = if fields.len() > 36 { &fields[36] } else if fields.len() > 6 { &fields[6] } else { "N/A" };
+    let amount = if fields.len() > 37 { &fields[37] } else { "N/A" };
+
+    let cur_f: f64 = current.parse().unwrap_or(0.0);
+    let yest_f: f64 = yesterday_close.parse().unwrap_or(0.0);
+    let change_pct = if yest_f > 0.0 { (cur_f - yest_f) / yest_f * 100.0 } else { 0.0 };
+    let change_abs = cur_f - yest_f;
+    let emoji = if change_pct > 0.0 { "📈" } else if change_pct < 0.0 { "📉" } else { "➡️" };
+
+    Ok(format!(
+        "{emoji} {name}({market}) 实时行情\n\
+当前价格: {current}\n\
+涨跌幅: {change_pct:+.2}% ({change_abs:+.2}) {emoji}\n\
+今开: {open}\n\
+最高: {high}\n\
+最低: {low}\n\
+成交量: {volume}\n\
+成交额: {amount}\n\
+昨收: {yesterday_close}\n\
+数据来源: {source}",
+    ))
+}
+
+/// Fetch from Sina Finance API for futures/commodities/indices
+async fn fetch_sina_futures(symbol: &str, display: &str) -> anyhow::Result<String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()?;
+
+    let url = format!("https://hq.sinajs.cn/list={}", symbol);
+    let resp = client
+        .get(&url)
+        .header("Referer", "https://finance.sina.com.cn")
+        .send()
+        .await?;
+
+    let body_bytes = resp.bytes().await?;
+    // Sina returns GBK encoding for Chinese content
+    let text = decode_gbk_or_utf8(&body_bytes);
+
+    // Format: var hq_str_hf_GC="...,price,change,...";
+    let start = text.find('"').unwrap_or(0) + 1;
+    let end = text.rfind('"').unwrap_or(text.len());
+    if start >= end || end - start < 5 {
+        anyhow::bail!("Sina API 返回空数据: {}", display);
+    }
+    let content = &text[start..end];
+    let fields: Vec<&str> = content.split(',').collect();
+
+    if fields.len() < 8 {
+        anyhow::bail!("Sina数据字段不足: {} 仅{}个字段", display, fields.len());
+    }
+
+    // Futures format: 0=current, 1=?, 2=buy, 3=sell, 4=high, 5=low, 6=time, 7=yesterday_close, 8=open, ...
+    let current = fields[0];
+    let high = if fields.len() > 4 { fields[4] } else { "N/A" };
+    let low = if fields.len() > 5 { fields[5] } else { "N/A" };
+    let yesterday = if fields.len() > 7 { fields[7] } else { "0" };
+    let open = if fields.len() > 8 { fields[8] } else { "N/A" };
+    let time_str = if fields.len() > 12 { fields[12] } else if fields.len() > 6 { fields[6] } else { "" };
+
+    let cur_f: f64 = current.parse().unwrap_or(0.0);
+    let yest_f: f64 = yesterday.parse().unwrap_or(0.0);
+    let change_pct = if yest_f > 0.0 { (cur_f - yest_f) / yest_f * 100.0 } else { 0.0 };
+    let change_abs = cur_f - yest_f;
+    let emoji = if change_pct > 0.0 { "📈" } else if change_pct < 0.0 { "📉" } else { "➡️" };
+
+    Ok(format!(
+        "{emoji} {display} 实时行情\n\
+当前价格: {current}\n\
+涨跌幅: {change_pct:+.2}% ({change_abs:+.2}) {emoji}\n\
+今开: {open}\n\
+最高: {high}\n\
+最低: {low}\n\
+昨收: {yesterday}\n\
+更新时间: {time_str}\n\
+数据来源: 新浪财经",
+    ))
+}
+
+/// Fetch index data from Sina Finance
+async fn fetch_sina_index(symbol: &str, display: &str) -> anyhow::Result<String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()?;
+
+    // Strip "b_" prefix for Sina: b_N225 → int_N225, b_GSPC → int_$GSPC, b_DJI → int_$DJI
+    let sina_sym = if symbol.starts_with("b_") {
+        let rest = &symbol[2..];
+        match rest {
+            "GSPC" => "int_$GSPC".to_string(),
+            "DJI" => "int_$DJI".to_string(),
+            "IXIC" => "int_$IXIC".to_string(),
+            "N225" => "int_nikkei".to_string(),
+            _ => format!("int_{}", rest),
+        }
+    } else {
+        symbol.to_string()
+    };
+
+    let url = format!("https://hq.sinajs.cn/list={}", sina_sym);
+    let resp = client
+        .get(&url)
+        .header("Referer", "https://finance.sina.com.cn")
+        .send()
+        .await?;
+
+    let body_bytes = resp.bytes().await?;
+    let text = decode_gbk_or_utf8(&body_bytes);
+
+    let start = text.find('"').unwrap_or(0) + 1;
+    let end = text.rfind('"').unwrap_or(text.len());
+    if start >= end || end - start < 5 {
+        anyhow::bail!("Sina指数API返回空数据: {}", display);
+    }
+    let content = &text[start..end];
+    let fields: Vec<&str> = content.split(',').collect();
+
+    if fields.len() < 3 {
+        anyhow::bail!("Sina指数数据不足: {} 仅{}个字段", display, fields.len());
+    }
+
+    // Index format varies, try common patterns
+    // International: name,current,change,...
+    let name_field = fields[0];
+    let current = fields.get(1).unwrap_or(&"N/A");
+    let change_str = fields.get(7).unwrap_or(fields.get(2).unwrap_or(&"0"));
+    let change_pct_str = fields.get(8).unwrap_or(fields.get(3).unwrap_or(&"0"));
+
+    let cur_f: f64 = current.parse().unwrap_or(0.0);
+    let change_f: f64 = change_str.parse().unwrap_or(0.0);
+    let change_pct: f64 = change_pct_str.parse().unwrap_or(
+        if cur_f > 0.0 && change_f.abs() > 0.0 { change_f / (cur_f - change_f) * 100.0 } else { 0.0 }
+    );
+    let emoji = if change_f > 0.0 { "📈" } else if change_f < 0.0 { "📉" } else { "➡️" };
+
+    let time_str = fields.get(fields.len().saturating_sub(1)).unwrap_or(&"");
+    let display_name = if !name_field.is_empty() && !name_field.chars().all(|c| c.is_numeric() || c == '.' || c == '-') {
+        format!("{} ({})", display, name_field)
+    } else {
+        display.to_string()
+    };
+
+    Ok(format!(
+        "{emoji} {display_name} 实时行情\n\
+当前点位: {current}\n\
+涨跌: {change_f:+.2} ({change_pct:+.2}%) {emoji}\n\
+更新时间: {time_str}\n\
+数据来源: 新浪财经",
+    ))
+}
+
+fn decode_gbk_or_utf8(bytes: &[u8]) -> String {
+    // Try UTF-8 first
+    if let Ok(s) = std::str::from_utf8(bytes) {
+        return s.to_string();
+    }
+    // Fall back to GBK decoding
+    use encoding_rs::GBK;
+    let (cow, _, _) = GBK.decode(bytes);
+    cow.to_string()
 }
 
 fn format_volume(v: &str) -> String {
@@ -1246,7 +2282,8 @@ pub async fn chat_stream_start(
 
     tokio::spawn(async move {
         let history_msgs = history_messages_to_chat(&history);
-        let messages = build_messages(&cfg.agent.system_prompt, &history_msgs, &message);
+        let full_prompt = crate::build_full_system_prompt(&cfg, Some(&message));
+        let messages = build_messages(&full_prompt, &history_msgs, &message);
 
         let agent_cfg = AgentConfig {
             max_rounds: 8,

@@ -185,6 +185,15 @@ impl ToolRegistry {
         });
 
         self.register(ToolSpec {
+            name: "get_market_price".into(),
+            description: "Get real-time market price for ANY financial asset: A-shares (沪深股票), HK stocks (港股), US stocks (美股), JP stocks (日股), gold (黄金), silver (白银), crude oil (原油), commodities, forex, crypto. Accepts natural language queries like '茅台', 'AAPL', '黄金', '恒生指数', '日经', 'BTCUSDT'. Always use this for financial data queries.".into(),
+            operation_type: "read_file".into(),
+            parameters: vec![
+                ToolParam { name: "query".into(), param_type: "string".into(), description: "Asset query - stock name/code/ticker, commodity name, crypto symbol. Examples: '茅台', 'sh600519', '腾讯', 'hk00700', 'AAPL', 'TSLA', '黄金', '白银', '原油', '纳指', '日经', 'BTCUSDT'".into(), required: true },
+            ],
+        });
+
+        self.register(ToolSpec {
             name: "quick_reply_wechat".into(),
             description: "Send a message to a WeChat contact quickly. Focuses WeChat window, finds the contact in chat list, clicks input box, types message, and sends. This is a high-level macro - use this instead of manual analyze_screen + mouse_click sequences for WeChat replies.".into(),
             operation_type: "execute_shell".into(),

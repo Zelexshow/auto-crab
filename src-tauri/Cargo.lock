@@ -314,6 +314,7 @@ dependencies = [
  "chrono",
  "cron",
  "directories",
+ "encoding_rs",
  "enigo",
  "futures",
  "image",

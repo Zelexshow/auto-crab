@@ -24,6 +24,7 @@ pub struct DueJob {
     pub name: String,
     pub action: String,
     pub auto_execute: bool,
+    pub skill_ref: Option<String>,
 }
 
 impl TaskScheduler {
@@ -52,6 +53,7 @@ impl TaskScheduler {
                         name: job.name.clone(),
                         action: job.action.clone(),
                         auto_execute: job.auto_execute && !self.require_confirmation,
+                        skill_ref: job.skill_ref.clone(),
                     });
                 }
             }

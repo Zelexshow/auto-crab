@@ -145,6 +145,125 @@ fn create_memory(cfg: &config::AppConfig) -> Option<std::sync::Arc<core::long_me
     })
 }
 
+/// Parse natural language for monitoring intent.
+/// Returns (interval_secs, description) if the message looks like a monitor request.
+/// Supports: crypto, A-shares, HK/US/JP stocks, gold, silver, commodities, forex.
+fn parse_natural_monitor(text: &str) -> Option<(u64, String)> {
+    let lower = text.to_lowercase();
+
+    let has_monitor_intent = lower.contains("盯盘") || lower.contains("盯一下")
+        || lower.contains("盯着") || lower.contains("帮我盯")
+        || lower.contains("持续监控") || lower.contains("定时查")
+        || lower.contains("每隔") || lower.contains("monitor");
+
+    if !has_monitor_intent {
+        return None;
+    }
+
+    let has_financial_asset =
+        // Crypto
+        lower.contains("btc") || lower.contains("eth") || lower.contains("sol")
+        || lower.contains("bnb") || lower.contains("xrp") || lower.contains("doge")
+        || lower.contains("比特币") || lower.contains("以太坊") || lower.contains("币价") || lower.contains("crypto")
+        // Commodities
+        || lower.contains("黄金") || lower.contains("白银") || lower.contains("gold") || lower.contains("silver")
+        || lower.contains("原油") || lower.contains("crude") || lower.contains("wti")
+        // Stocks
+        || lower.contains("茅台") || lower.contains("平安") || lower.contains("宁德") || lower.contains("比亚迪")
+        || lower.contains("腾讯") || lower.contains("阿里") || lower.contains("美团") || lower.contains("小米")
+        || lower.contains("苹果") || lower.contains("特斯拉") || lower.contains("英伟达") || lower.contains("微软")
+        // Indices
+        || lower.contains("上证") || lower.contains("沪深") || lower.contains("创业板") || lower.contains("恒生")
+        || lower.contains("恒指") || lower.contains("纳指") || lower.contains("纳斯达克") || lower.contains("道琼斯")
+        || lower.contains("道指") || lower.contains("标普") || lower.contains("日经")
+        // Markets
+        || lower.contains("a股") || lower.contains("港股") || lower.contains("美股") || lower.contains("日股")
+        // Forex
+        || lower.contains("美元") || lower.contains("人民币") || lower.contains("汇率")
+        // Stock codes
+        || regex::Regex::new(r"(?i)(sh|sz)\d{6}|hk\d{5}|\b[A-Z]{2,5}\b").ok()
+            .and_then(|re| re.find(&lower)).is_some();
+
+    if !has_financial_asset {
+        return None;
+    }
+
+    let interval = extract_interval(text);
+    let desc = extract_monitor_description(text);
+
+    Some((interval, desc))
+}
+
+/// Extract a concise description of what to monitor from the user's natural language.
+fn extract_monitor_description(text: &str) -> String {
+    let lower = text.to_lowercase();
+    let mut targets: Vec<&str> = Vec::new();
+
+    // Detect all mentioned assets
+    let checks: Vec<(&str, &str)> = vec![
+        ("btc", "BTC"), ("eth", "ETH"), ("sol", "SOL"), ("bnb", "BNB"), ("doge", "DOGE"),
+        ("比特币", "BTC"), ("以太坊", "ETH"),
+        ("黄金", "黄金"), ("gold", "黄金"), ("白银", "白银"), ("silver", "白银"),
+        ("原油", "原油"), ("crude", "原油"), ("wti", "原油"),
+        ("茅台", "茅台"), ("平安", "中国平安"), ("宁德", "宁德时代"), ("比亚迪", "比亚迪"),
+        ("腾讯", "腾讯"), ("阿里", "阿里巴巴"), ("美团", "美团"), ("小米", "小米"),
+        ("苹果", "苹果/AAPL"), ("特斯拉", "特斯拉/TSLA"), ("英伟达", "英伟达/NVDA"), ("微软", "微软/MSFT"),
+        ("上证", "上证指数"), ("沪深300", "沪深300"), ("创业板", "创业板"),
+        ("恒生", "恒生指数"), ("恒指", "恒生指数"),
+        ("纳指", "纳指"), ("纳斯达克", "纳指"), ("道指", "道指"), ("道琼斯", "道指"), ("标普", "标普500"),
+        ("日经", "日经225"),
+        ("美元指数", "美元指数"), ("人民币", "美元/人民币"),
+    ];
+
+    for (kw, label) in &checks {
+        if lower.contains(kw) && !targets.contains(label) {
+            targets.push(label);
+        }
+    }
+
+    if targets.is_empty() {
+        format!("盯盘 {}", text.chars().take(30).collect::<String>())
+    } else {
+        format!("盯盘 {}", targets.join("/"))
+    }
+}
+
+/// Extract time interval from natural language. Defaults to 300s (5min).
+fn extract_interval(text: &str) -> u64 {
+    use regex::Regex;
+
+    // "5min", "5m", "5分钟", "5分", "10s", "10秒"
+    if let Ok(re) = Regex::new(r"(\d+)\s*(?:min|m|分钟|分)") {
+        if let Some(cap) = re.captures(text) {
+            if let Ok(n) = cap[1].parse::<u64>() {
+                return (n * 60).max(30);
+            }
+        }
+    }
+    if let Ok(re) = Regex::new(r"(\d+)\s*(?:s|秒)") {
+        if let Some(cap) = re.captures(text) {
+            if let Ok(n) = cap[1].parse::<u64>() {
+                return n.max(30);
+            }
+        }
+    }
+    if let Ok(re) = Regex::new(r"每\s*(\d+)\s*(?:分钟|分|min|m)") {
+        if let Some(cap) = re.captures(text) {
+            if let Ok(n) = cap[1].parse::<u64>() {
+                return (n * 60).max(30);
+            }
+        }
+    }
+    if let Ok(re) = Regex::new(r"(\d+)\s*(?:h|小时|hour)") {
+        if let Some(cap) = re.captures(text) {
+            if let Ok(n) = cap[1].parse::<u64>() {
+                return (n * 3600).max(30);
+            }
+        }
+    }
+    300 // default 5 minutes
+}
+
 fn extract_crypto_symbols(desc: &str) -> Vec<String> {
     let desc_upper = desc.to_uppercase();
     let known = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "DOGEUSDT", "ADAUSDT", "AVAXUSDT"];
@@ -154,6 +273,203 @@ fn extract_crypto_symbols(desc: &str) -> Vec<String> {
         .collect();
     if found.is_empty() { found.push("BTCUSDT".into()); }
     found
+}
+
+/// Extract market queries from a monitor description.
+/// Converts keywords like "BTC", "茅台", "黄金" into queries for `fetch_market_price`.
+fn extract_monitor_queries(desc: &str) -> Vec<String> {
+    let lower = desc.to_lowercase();
+    let mut queries: Vec<String> = Vec::new();
+
+    let asset_keywords: Vec<(&str, &str)> = vec![
+        // Crypto
+        ("btc", "BTCUSDT"), ("eth", "ETHUSDT"), ("sol", "SOLUSDT"),
+        ("bnb", "BNBUSDT"), ("xrp", "XRPUSDT"), ("doge", "DOGEUSDT"),
+        ("比特币", "BTCUSDT"), ("以太坊", "ETHUSDT"),
+        // Commodities
+        ("黄金", "黄金"), ("gold", "黄金"), ("白银", "白银"), ("silver", "白银"),
+        ("原油", "原油"), ("crude", "原油"), ("wti", "原油"),
+        // A-shares
+        ("茅台", "茅台"), ("平安", "平安"), ("宁德", "宁德"), ("比亚迪", "比亚迪a"),
+        ("招行", "招行"), ("五粮液", "五粮液"), ("万科", "万科"),
+        ("上证指数", "上证指数"), ("沪深300", "沪深300"), ("创业板", "创业板"),
+        // HK
+        ("腾讯", "腾讯"), ("阿里", "阿里"), ("美团", "美团"), ("小米", "小米"),
+        ("恒生", "恒生指数"), ("恒指", "恒生指数"),
+        // US
+        ("苹果", "苹果"), ("特斯拉", "特斯拉"), ("英伟达", "英伟达"), ("微软", "微软"),
+        ("纳指", "纳指"), ("纳斯达克", "纳指"), ("道指", "道指"), ("道琼斯", "道指"), ("标普", "标普"),
+        // JP
+        ("日经", "日经"),
+        // Forex
+        ("美元指数", "美元指数"), ("人民币", "美元人民币"),
+    ];
+
+    for (kw, query) in &asset_keywords {
+        if lower.contains(kw) && !queries.contains(&query.to_string()) {
+            queries.push(query.to_string());
+        }
+    }
+
+    queries
+}
+
+/// Build the full system prompt with context-aware skill injection.
+/// Only injects skills that match the user's message or are marked always_on.
+pub fn build_full_system_prompt(cfg: &config::AppConfig, user_input: Option<&str>) -> String {
+    let mut prompt = cfg.agent.system_prompt.clone();
+
+    if !cfg.agent.custom_instructions.is_empty() {
+        prompt.push_str(&format!("\n\n【用户自定义指令】\n{}", cfg.agent.custom_instructions));
+    }
+
+    let matched = match_skills(&cfg.agent.skills, user_input);
+    if !matched.is_empty() {
+        let skill_text: Vec<String> = matched.iter()
+            .map(|s| format!("[{}] {}", s.name, s.content))
+            .collect();
+        prompt.push_str(&format!("\n\n【已激活技能】\n{}", skill_text.join("\n")));
+    }
+
+    prompt
+}
+
+/// Build prompt for scheduled tasks with explicit skill_ref.
+pub fn build_scheduled_prompt(cfg: &config::AppConfig, skill_ref: Option<&str>) -> String {
+    let mut prompt = cfg.agent.system_prompt.clone();
+
+    if !cfg.agent.custom_instructions.is_empty() {
+        prompt.push_str(&format!("\n\n【用户自定义指令】\n{}", cfg.agent.custom_instructions));
+    }
+
+    if let Some(ref_name) = skill_ref {
+        if let Some(skill) = cfg.agent.skills.iter().find(|s| s.name == ref_name) {
+            prompt.push_str(&format!("\n\n【已激活技能: {}】\n{}", skill.name, skill.content));
+        }
+    }
+
+    let always_on: Vec<&config::UserSkill> = cfg.agent.skills.iter()
+        .filter(|s| s.always_on && skill_ref.map_or(true, |r| s.name != r))
+        .collect();
+    if !always_on.is_empty() {
+        let text: Vec<String> = always_on.iter()
+            .map(|s| format!("[{}] {}", s.name, s.content))
+            .collect();
+        prompt.push_str(&format!("\n\n【常驻技能】\n{}", text.join("\n")));
+    }
+
+    prompt
+}
+
+/// Match skills against user input by keyword scanning.
+fn match_skills<'a>(skills: &'a [config::UserSkill], user_input: Option<&str>) -> Vec<&'a config::UserSkill> {
+    let mut matched: Vec<&config::UserSkill> = skills.iter()
+        .filter(|s| s.always_on)
+        .collect();
+
+    if let Some(input) = user_input {
+        let input_lower = input.to_lowercase();
+        for skill in skills {
+            if skill.always_on { continue; }
+            let hit = skill.keywords.iter().any(|kw| {
+                input_lower.contains(&kw.to_lowercase())
+            });
+            if hit {
+                matched.push(skill);
+            }
+        }
+    }
+
+    matched
+}
+
+/// Pre-fetch real market data and news for scheduled job actions.
+/// If the action mentions investment/market keywords, fetches real-time prices
+/// and news, then injects them into the prompt so the LLM has actual data.
+async fn enrich_scheduled_action(action: &str) -> String {
+    let lower = action.to_lowercase();
+
+    let is_investment = lower.contains("投资") || lower.contains("行情") || lower.contains("盯盘")
+        || lower.contains("market") || lower.contains("报告") || lower.contains("stock")
+        || lower.contains("金融") || lower.contains("交易");
+
+    let is_learning = lower.contains("学习") || lower.contains("科技") || lower.contains("技术动态")
+        || lower.contains("tech") || lower.contains("职业");
+
+    if !is_investment && !is_learning {
+        return action.to_string();
+    }
+
+    let now = chrono::Local::now().format("%Y-%m-%d %H:%M").to_string();
+    let mut sections: Vec<String> = Vec::new();
+
+    if is_investment {
+        // Pre-fetch market data for all key assets
+        let assets = vec![
+            ("上证指数", "上证指数"), ("沪深300", "沪深300"), ("创业板", "创业板"),
+            ("恒生指数", "恒生指数"),
+            ("纳指", "纳指"), ("道指", "道指"), ("标普", "标普"),
+            ("日经", "日经"),
+            ("BTCUSDT", "BTCUSDT"), ("ETHUSDT", "ETHUSDT"),
+            ("黄金", "黄金"), ("白银", "白银"), ("原油", "原油"),
+            ("美元人民币", "美元人民币"),
+        ];
+
+        let mut price_data = Vec::new();
+        for (label, query) in &assets {
+            match commands::fetch_market_price_pub(query).await {
+                Ok(info) => {
+                    let brief: String = info.lines().take(4).collect::<Vec<_>>().join(" | ");
+                    price_data.push(format!("• {}: {}", label, brief));
+                }
+                Err(_) => price_data.push(format!("• {}: 暂无数据", label)),
+            }
+        }
+        sections.push(format!("【实时行情数据 ({})】\n{}", now, price_data.join("\n")));
+
+        // Fetch financial news
+        let news_queries = vec!["A股市场今日要闻", "美股科技股最新动态", "加密货币市场新闻"];
+        let mut news_data = Vec::new();
+        for nq in &news_queries {
+            match commands::search_web_pub(nq).await {
+                Ok(results) => {
+                    let brief: String = results.chars().take(500).collect();
+                    news_data.push(format!("[{}]\n{}", nq, brief));
+                }
+                Err(_) => {}
+            }
+        }
+        if !news_data.is_empty() {
+            sections.push(format!("【市场新闻动态】\n{}", news_data.join("\n\n")));
+        }
+    }
+
+    if is_learning {
+        let tech_queries = vec!["AI人工智能最新进展", "加密货币区块链最新动态", "机器人技术突破"];
+        let mut tech_data = Vec::new();
+        for tq in &tech_queries {
+            match commands::search_web_pub(tq).await {
+                Ok(results) => {
+                    let brief: String = results.chars().take(500).collect();
+                    tech_data.push(format!("[{}]\n{}", tq, brief));
+                }
+                Err(_) => {}
+            }
+        }
+        if !tech_data.is_empty() {
+            sections.push(format!("【科技圈最新动态 ({})】\n{}", now, tech_data.join("\n\n")));
+        }
+    }
+
+    if sections.is_empty() {
+        return action.to_string();
+    }
+
+    format!(
+        "{}\n\n以下是预先获取的实时数据，请基于这些数据完成分析，不要编造数据：\n\n{}",
+        action,
+        sections.join("\n\n")
+    )
 }
 
 fn build_remote_reply(text: &str) -> String {
@@ -184,7 +500,8 @@ async fn run_remote_chat(
     use crate::core::engine::*;
 
     let engine = AgentEngine::from_config(cfg)?;
-    let messages = build_messages(&cfg.agent.system_prompt, history, user_input);
+    let full_prompt = build_full_system_prompt(cfg, Some(user_input));
+    let messages = build_messages(&full_prompt, history, user_input);
     let sink = StringCollectorSink;
     let stream_id = uuid::Uuid::new_v4().to_string();
 
@@ -294,6 +611,94 @@ async fn handle_remote_control_command(
                 );
             }
 
+            // Natural language monitor detection: "盯盘BTC 5min", "每5分钟看下ETH", etc.
+            if let Some((interval, description)) = parse_natural_monitor(text) {
+                let active_key = conv_state.get_active_session(&cmd.user_id).await;
+                let final_key = if active_key.is_empty() { session_key.clone() } else { active_key };
+                let history = conv_state.get_history(&final_key).await;
+
+                let immediate = match run_remote_chat(cfg, &history, text, audit_ref).await {
+                    Ok(answer) => {
+                        conv_state.append_turn(&final_key, text, &answer).await;
+                        answer
+                    }
+                    Err(_) => String::new(),
+                };
+
+                let monitor_id = uuid::Uuid::new_v4().to_string()[..8].to_string();
+                let (cancel_tx, mut cancel_rx) = tokio::sync::watch::channel(false);
+
+                let monitor = app.state::<MonitorState>();
+                monitor.add(monitor_id.clone(), MonitorTask {
+                    description: description.clone(),
+                    interval_secs: interval,
+                    cancel: cancel_tx,
+                }).await;
+
+                let cfg_clone = cfg.clone();
+                let feishu_config = cfg.remote.feishu.clone();
+                let user_id = cmd.user_id.clone();
+                let mid = monitor_id.clone();
+                let desc = description.clone();
+
+                tokio::spawn(async move {
+                    let mut price_history: Vec<(String, String)> = Vec::new();
+                    let max_history = 5;
+                    let mut round = 0u32;
+
+                    loop {
+                        tokio::select! {
+                            _ = tokio::time::sleep(std::time::Duration::from_secs(interval)) => {},
+                            _ = cancel_rx.changed() => { break; }
+                        }
+                        if *cancel_rx.borrow() { break; }
+                        round += 1;
+
+                        let queries = extract_monitor_queries(&desc);
+                        let mut price_lines = Vec::new();
+                        for q in &queries {
+                            match commands::fetch_market_price_pub(q).await {
+                                Ok(info) => price_lines.push(info),
+                                Err(e) => price_lines.push(format!("{}: 获取失败 {}", q, e)),
+                            }
+                        }
+
+                        let now = chrono::Local::now().format("%H:%M:%S").to_string();
+                        let price_text = price_lines.join("\n---\n");
+
+                        let hist_summary = price_history.iter().map(|(ts, a)| {
+                            format!("[{}] {}", ts, a.chars().take(80).collect::<String>())
+                        }).collect::<Vec<_>>().join("\n");
+
+                        let analysis_prompt = format!(
+                            "你是资深金融分析师。用户正在盯盘（第{}轮，每{}秒）。\n\n当前数据:\n{}\n\n{}\n\n请简洁分析：1.关键数据 2.与上轮对比变化 3.趋势判断 4.操作建议。限200字。",
+                            round, interval, price_text,
+                            if price_history.is_empty() { "首次分析".to_string() } else { format!("历史:\n{}", hist_summary) }
+                        );
+
+                        let analysis = match run_remote_chat(&cfg_clone, &[], &analysis_prompt, None).await {
+                            Ok(t) => t,
+                            Err(_) => format!("📊 第{}轮\n\n{}", round, price_text),
+                        };
+
+                        price_history.push((now, price_lines.first().cloned().unwrap_or_default()));
+                        if price_history.len() > max_history { price_history.remove(0); }
+
+                        let msg = format!("🔍 [{}] {} (第{}轮)\n\n{}", mid, desc, round, analysis);
+                        if let Some(ref fc) = feishu_config {
+                            let mut bot = crate::remote::feishu::FeishuBot::new(fc.clone());
+                            let _ = bot.send_message(&user_id, &msg).await;
+                        }
+                    }
+                });
+
+                return if immediate.is_empty() {
+                    format!("🔍 已启动盯盘监控\nID: {}\n间隔: {}秒\n标的: {}", monitor_id, interval, description)
+                } else {
+                    format!("{}\n\n---\n🔍 已自动启动盯盘（每{}秒更新）\nID: {}\n发送 /monitor stop {} 停止", immediate, interval, monitor_id, monitor_id)
+                };
+            }
+
             if text.starts_with("/monitor ") {
                 let rest = text.strip_prefix("/monitor ").unwrap_or("").trim();
                 let mut parts = rest.splitn(2, ' ');
@@ -339,18 +744,14 @@ async fn handle_remote_control_command(
 
                         tracing::info!("Monitor {} round {}: {}", mid, round, desc);
 
-                        let desc_lower = desc.to_lowercase();
-                        let is_crypto = desc_lower.contains("btc") || desc_lower.contains("eth")
-                            || desc_lower.contains("sol") || desc_lower.contains("盯盘")
-                            || desc_lower.contains("币") || desc_lower.contains("usdt");
-
-                        if is_crypto {
-                            let symbols = extract_crypto_symbols(&desc);
+                        // Try unified market data API for financial assets
+                        let queries = extract_monitor_queries(&desc);
+                        if !queries.is_empty() {
                             let mut price_lines = Vec::new();
-                            for sym in &symbols {
-                                match commands::fetch_crypto_price_pub(sym).await {
+                            for q in &queries {
+                                match commands::fetch_market_price_pub(q).await {
                                     Ok(info) => price_lines.push(info),
-                                    Err(e) => price_lines.push(format!("{}: 获取失败 {}", sym, e)),
+                                    Err(e) => price_lines.push(format!("{}: 获取失败 {}", q, e)),
                                 }
                             }
 
@@ -625,6 +1026,12 @@ pub fn run() {
             commands::load_conversation,
             commands::list_conversations,
             commands::delete_conversation,
+            commands::list_skills,
+            commands::save_skill,
+            commands::delete_skill,
+            commands::rename_skill_cmd,
+            commands::get_skills_dir,
+            commands::get_search_usage_stats,
         ])
         .setup(|app| {
             let app_handle = app.handle().clone();
@@ -639,6 +1046,9 @@ pub fn run() {
                 // Start webhook server if remote control is enabled
                 match config::load_config(&handle_clone).await {
                     Ok(cfg) => {
+                        // Initialize search API config globally
+                        commands::update_search_config(&cfg.search);
+
                         if cfg.remote.enabled {
                             let (tx, mut rx) = tokio::sync::mpsc::channel(32);
                             let server = remote::webhook_server::WebhookServer::new(&cfg, tx);
@@ -718,10 +1128,11 @@ pub fn run() {
                                     for job in due {
                                         tracing::info!("Scheduled task triggered: {} (auto={})", job.name, job.auto_execute);
                                         if job.auto_execute {
-                                            let result = run_remote_chat(&sched_cfg, &[], &job.action, None).await;
+                                            let enriched_action = enrich_scheduled_action(&job.action).await;
+                                            let result = run_remote_chat(&sched_cfg, &[], &enriched_action, None).await;
                                             let msg = match result {
-                                                Ok(text) => format!("📋 定时任务: {}\n\n{}", job.name, text),
-                                                Err(e) => format!("📋 定时任务: {} 执行失败\n{}", job.name, e),
+                                                Ok(text) => format!("📋 {}\n\n{}", job.name, text),
+                                                Err(e) => format!("📋 {} 执行失败\n{}", job.name, e),
                                             };
                                             if let Some(ref fc) = sched_feishu {
                                                 let mut bot = remote::feishu::FeishuBot::new(fc.clone());

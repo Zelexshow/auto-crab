@@ -1,7 +1,7 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open as dialogOpen } from "@tauri-apps/plugin-dialog";
-import { Save, Key, Shield, Bot, Globe, Terminal, ChevronRight, Loader2, FolderOpen } from "lucide-react";
+import { Save, Key, Shield, Bot, Globe, Terminal, ChevronRight, Loader2, FolderOpen, Clock, Sparkles, Plus, Trash2, Upload } from "lucide-react";
 
 const PROVIDERS = [
   { value: "", label: "未配置" },
@@ -85,6 +85,12 @@ export function SettingsView() {
   const [networkDomains, setNetworkDomains] = useState("");
   const [fileAccess, setFileAccess] = useState("");
 
+  const [searchProvider, setSearchProvider] = useState("auto");
+  const [serpapiApiKey, setSerpapiApiKey] = useState("");
+  const [braveApiKey, setBraveApiKey] = useState("");
+  const [tavilyApiKey, setTavilyApiKey] = useState("");
+  const [searchStats, setSearchStats] = useState<any>(null);
+
   const [remoteEnabled, setRemoteEnabled] = useState(false);
   const [feishuAppId, setFeishuAppId] = useState("");
   const [feishuPollInterval, setFeishuPollInterval] = useState("30");
@@ -94,6 +100,45 @@ export function SettingsView() {
   const [wechatPollInterval, setWechatPollInterval] = useState("30");
 
   const [autoLockMin, setAutoLockMin] = useState("15");
+
+  // Scheduled tasks
+  const [schedEnabled, setSchedEnabled] = useState(false);
+  const [schedJobs, setSchedJobs] = useState<{ name: string; cron: string; action: string; auto_execute: boolean; skill_ref?: string }[]>([]);
+  const [expandedJob, setExpandedJob] = useState<number | null>(null);
+  const [newJobName, setNewJobName] = useState("");
+  const [newJobCron, setNewJobCron] = useState("");
+  const [newJobAction, setNewJobAction] = useState("");
+  const [newJobSkillRef, setNewJobSkillRef] = useState("");
+
+  // User skills (named, stored as individual .md files)
+  const [userSkills, setUserSkills] = useState<{ name: string; content: string; keywords?: string[]; always_on?: boolean }[]>([]);
+  const [newSkillName, setNewSkillName] = useState("");
+  const [newSkillKeywords, setNewSkillKeywords] = useState("");
+  const [newSkillAlwaysOn, setNewSkillAlwaysOn] = useState(false);
+  const [newSkillContent, setNewSkillContent] = useState("");
+  const [expandedSkill, setExpandedSkill] = useState<number | null>(null);
+  const [customInstructions, setCustomInstructions] = useState("");
+  const [skillsDir, setSkillsDir] = useState("");
+  const [dragOver, setDragOver] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const handleSkillFiles = async (files: FileList | null) => {
+    if (!files) return;
+    const imported: { name: string; content: string }[] = [];
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      if (!file.name.endsWith(".md") && !file.name.endsWith(".txt")) continue;
+      const content = await file.text();
+      const name = file.name.replace(/\.(md|txt)$/, "");
+      if (userSkills.some(s => s.name === name)) continue;
+      const skill = { name, content };
+      await invoke("save_skill", { skill }).catch(() => {});
+      imported.push(skill);
+    }
+    if (imported.length > 0) {
+      setUserSkills(prev => [...prev, ...imported]);
+    }
+  };
 
   const [keyName, setKeyName] = useState("");
   const [apiKeyInput, setApiKeyInput] = useState("");
@@ -132,6 +177,12 @@ export function SettingsView() {
         setNetworkDomains((cfg.tools.network_allowed_domains ?? []).join(", "));
         setFileAccess((cfg.tools.file_access ?? []).join(", "));
       }
+      if (cfg.search) {
+        setSearchProvider(cfg.search.provider ?? "auto");
+        setSerpapiApiKey(cfg.search.serpapi_api_key ?? "");
+        setBraveApiKey(cfg.search.brave_api_key ?? "");
+        setTavilyApiKey(cfg.search.tavily_api_key ?? "");
+      }
       if (cfg.remote) {
         setRemoteEnabled(cfg.remote.enabled ?? false);
         if (cfg.remote.feishu) {
@@ -148,8 +199,27 @@ export function SettingsView() {
       if (cfg.security) {
         setAutoLockMin(String(cfg.security.auto_lock_minutes ?? 15));
       }
+      if (cfg.scheduled_tasks) {
+        setSchedEnabled(cfg.scheduled_tasks.enabled ?? false);
+        setSchedJobs(cfg.scheduled_tasks.jobs ?? []);
+      }
+      if (cfg.agent) {
+        setCustomInstructions(cfg.agent.custom_instructions ?? "");
+      }
       setConfigLoaded(true);
     }).catch(() => setConfigLoaded(true));
+
+    invoke<{ success: boolean; data?: { name: string; content: string }[] }>("list_skills").then((res) => {
+      if (res.success && res.data) setUserSkills(res.data);
+    }).catch(() => {});
+
+    invoke<{ success: boolean; data?: string }>("get_skills_dir").then((res) => {
+      if (res.success && res.data) setSkillsDir(res.data);
+    }).catch(() => {});
+
+    invoke<{ success: boolean; data?: any }>("get_search_usage_stats").then((res) => {
+      if (res.success && res.data) setSearchStats(res.data);
+    }).catch(() => {});
 
     const knownKeys = ["dashscope", "deepseek", "zhipu", "moonshot", "openai", "anthropic", "feishu-secret", "wechat-work-secret"];
     invoke<{ success: boolean; data?: { key: string; exists: boolean }[] }>("check_credentials", { keys: knownKeys }).then((res) => {
@@ -179,7 +249,6 @@ export function SettingsView() {
           coding: codingProvider ? { provider: codingProvider, model: codingModel, api_key_ref: `keychain://${PROVIDER_KEY_MAP[codingProvider] || codingProvider}` } : base.models?.coding ?? null,
           vision: visionProvider ? { provider: visionProvider, model: visionModel, api_key_ref: `keychain://${PROVIDER_KEY_MAP[visionProvider] || visionProvider}` } : base.models?.vision ?? null,
         },
-        agent: base.agent ?? { name: "小蟹", personality: "professional", max_context_tokens: 128000, system_prompt: "" },
         security: { ...(base.security || {}), auto_lock_minutes: parseInt(autoLockMin) || 15 },
         tools: {
           ...(base.tools || {}),
@@ -207,9 +276,33 @@ export function SettingsView() {
             poll_interval_secs: parseInt(wechatPollInterval) || 30,
           } : base.remote?.wechat_work ?? null,
         },
-        scheduled_tasks: base.scheduled_tasks ?? { enabled: false, require_confirmation: true, jobs: [] },
+        agent: {
+          ...(base.agent || {}),
+          name: base.agent?.name ?? "小蟹",
+          personality: base.agent?.personality ?? "professional",
+          max_context_tokens: base.agent?.max_context_tokens ?? 128000,
+          system_prompt: base.agent?.system_prompt ?? "",
+          custom_instructions: customInstructions,
+        },
+        scheduled_tasks: {
+          enabled: schedEnabled,
+          require_confirmation: false,
+          jobs: schedJobs,
+        },
+        search: {
+          provider: searchProvider,
+          serpapi_api_key: serpapiApiKey,
+          brave_api_key: braveApiKey,
+          tavily_api_key: tavilyApiKey,
+        },
       };
       await invoke("save_config", { configData: cfg });
+
+      // Save skills to individual .md files
+      for (const skill of userSkills) {
+        await invoke("save_skill", { skill });
+      }
+
       setConfigSaveMsg("✅ 配置已保存，重启应用后生效");
     } catch (e: any) {
       setConfigSaveMsg(`❌ 保存失败: ${e.toString()}`);
@@ -237,6 +330,8 @@ export function SettingsView() {
     { id: "security", label: "安全设置", icon: Shield },
     { id: "tools", label: "工具权限", icon: Terminal },
     { id: "remote", label: "远程控制", icon: Globe },
+    { id: "schedule", label: "定时任务", icon: Clock },
+    { id: "skills", label: "自定义技能", icon: Sparkles },
     { id: "credentials", label: "密钥管理", icon: Key },
   ];
 
@@ -464,6 +559,58 @@ export function SettingsView() {
                   </Row>
                 )}
               </Card>
+
+              <Card title="搜索引擎 API" desc="配置搜索 API 获取更可靠的全球搜索结果。未配置时使用免费的 DuckDuckGo/SearXNG 爬虫。">
+                <Row label="搜索方式">
+                  <select
+                    className="px-2 py-1 rounded text-sm"
+                    style={{ background: "var(--bg-secondary)", color: "var(--text-primary)", border: "1px solid var(--border-primary)" }}
+                    value={searchProvider}
+                    onChange={(e) => setSearchProvider(e.target.value)}
+                  >
+                    <option value="auto">自动（优先 API，回退爬虫）</option>
+                    <option value="serpapi">SerpApi（Google 搜索）</option>
+                    <option value="brave">Brave Search</option>
+                    <option value="tavily">Tavily（AI agent 专用）</option>
+                  </select>
+                </Row>
+                <Row label="SerpApi Key">
+                  <Input
+                    value={serpapiApiKey}
+                    onChange={setSerpapiApiKey}
+                    placeholder="xxxxxxxx（免费 250 次/月）"
+                    type="password"
+                  />
+                  <p className="text-[11px] mt-1" style={{ color: "var(--text-muted)" }}>
+                    免费注册：<a href="https://serpapi.com" target="_blank" rel="noopener noreferrer" style={{ color: "var(--accent)" }}>serpapi.com</a>（无需信用卡，250 次/月）
+                  </p>
+                </Row>
+                <Row label="Brave API Key">
+                  <Input
+                    value={braveApiKey}
+                    onChange={setBraveApiKey}
+                    placeholder="BSAxxxxxxxx（免费 1000 次/月）"
+                    type="password"
+                  />
+                  <p className="text-[11px] mt-1" style={{ color: "var(--text-muted)" }}>
+                    免费注册：<a href="https://brave.com/search/api/" target="_blank" rel="noopener noreferrer" style={{ color: "var(--accent)" }}>brave.com/search/api</a>（1000 次/月）
+                  </p>
+                </Row>
+                <Row label="Tavily API Key">
+                  <Input
+                    value={tavilyApiKey}
+                    onChange={setTavilyApiKey}
+                    placeholder="tvly-xxxxxxxx（免费 1000 credits/月）"
+                    type="password"
+                  />
+                  <p className="text-[11px] mt-1" style={{ color: "var(--text-muted)" }}>
+                    免费注册：<a href="https://tavily.com" target="_blank" rel="noopener noreferrer" style={{ color: "var(--accent)" }}>tavily.com</a>（1000 credits/月，AI agent 优化搜索）
+                  </p>
+                </Row>
+                <div className="mt-2 p-2 rounded text-[11px]" style={{ background: "var(--bg-tertiary)", color: "var(--text-muted)" }}>
+                  搜索优先级：{searchProvider === "tavily" ? "Tavily" : searchProvider === "serpapi" ? "SerpApi (Google)" : searchProvider === "brave" ? "Brave" : tavilyApiKey || serpapiApiKey || braveApiKey ? "API 优先" : "DuckDuckGo"} → {tavilyApiKey && searchProvider !== "serpapi" && searchProvider !== "brave" ? "Tavily → " : ""}{serpapiApiKey && searchProvider !== "tavily" && searchProvider !== "brave" ? "SerpApi → " : ""}{braveApiKey && searchProvider !== "tavily" && searchProvider !== "serpapi" ? "Brave → " : ""}DuckDuckGo → SearXNG
+                </div>
+              </Card>
             </Section>
           )}
 
@@ -525,26 +672,576 @@ export function SettingsView() {
             </Section>
           )}
 
+          {/* ============ 定时任务 ============ */}
+          {activeTab === "schedule" && (
+            <Section title="定时任务" desc="配置定时投资报告、科技日报等自动推送任务。通过飞书/企业微信定时接收分析报告。">
+              <Card title="总开关" desc="">
+                <div className="flex items-center justify-between">
+                  <span className="text-sm">启用定时任务</span>
+                  <Toggle on={schedEnabled} onChange={setSchedEnabled} />
+                </div>
+                {schedEnabled && schedJobs.length === 0 && (
+                  <div className="mt-2 p-3 rounded text-xs" style={{ background: "var(--bg-primary)", color: "var(--text-muted)" }}>
+                    暂无任务，点击下方「添加」或「加载默认」来创建。需先配置远程控制（飞书）才能接收推送。
+                  </div>
+                )}
+              </Card>
+
+              {schedEnabled && (
+                <>
+                  {schedJobs.map((job, idx) => {
+                    const isExpanded = expandedJob === idx;
+                    return (
+                    <div key={idx} className="rounded-lg" style={{ background: "var(--bg-secondary)", border: "1px solid var(--border)" }}>
+                      <button
+                        className="w-full flex items-center justify-between p-4 text-left"
+                        onClick={() => setExpandedJob(isExpanded ? null : idx)}
+                      >
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2">
+                            <h4 className="text-sm font-medium">{job.name}</h4>
+                            {job.skill_ref && (
+                              <span className="px-1.5 py-0.5 rounded text-[10px]" style={{ background: "var(--accent)", color: "white", opacity: 0.8 }}>
+                                {job.skill_ref}
+                              </span>
+                            )}
+                          </div>
+                          <p className="text-[11px] mt-0.5" style={{ color: "var(--text-muted)" }}>Cron: {job.cron}</p>
+                          {!isExpanded && (
+                            <p className="text-xs mt-1 truncate" style={{ color: "var(--text-secondary)" }}>
+                              {job.action.slice(0, 80)}{job.action.length > 80 ? "..." : ""}
+                            </p>
+                          )}
+                        </div>
+                        <ChevronRight size={14} className="shrink-0 ml-2 transition-transform" style={{ transform: isExpanded ? "rotate(90deg)" : "none", color: "var(--text-muted)" }} />
+                      </button>
+                      {isExpanded && (
+                        <div className="px-4 pb-4 space-y-3 border-t" style={{ borderColor: "var(--border)" }}>
+                          <div className="pt-3 space-y-3">
+                            <Row label="任务名称">
+                              <Input value={job.name} onChange={(v) => { const u = [...schedJobs]; u[idx] = { ...u[idx], name: v }; setSchedJobs(u); }} />
+                            </Row>
+                            <Row label="Cron 表达式">
+                              <Input value={job.cron} onChange={(v) => { const u = [...schedJobs]; u[idx] = { ...u[idx], cron: v }; setSchedJobs(u); }} />
+                              <span className="text-[11px]" style={{ color: "var(--text-muted)" }}>
+                                格式：分(0-59) 时(0-23) 日(1-31) 月(1-12) 周(0-7, 1-5=工作日)
+                              </span>
+                            </Row>
+                            <Row label="关联技能">
+                              <select
+                                value={job.skill_ref ?? ""}
+                                onChange={(e) => {
+                                  const u = [...schedJobs];
+                                  const skillName = e.target.value;
+                                  u[idx] = { ...u[idx], skill_ref: skillName || undefined };
+                                  if (skillName) {
+                                    const skill = userSkills.find(s => s.name === skillName);
+                                    if (skill) u[idx].action = skill.content;
+                                  }
+                                  setSchedJobs(u);
+                                }}
+                                className="w-full rounded-md px-3 py-1.5 text-sm outline-none appearance-none cursor-pointer"
+                                style={{ background: "var(--bg-primary)", border: "1px solid var(--border)", color: "var(--text-primary)" }}
+                              >
+                                <option value="">不关联（使用自定义指令）</option>
+                                {userSkills.map((s) => (
+                                  <option key={s.name} value={s.name}>{s.name}</option>
+                                ))}
+                              </select>
+                              <span className="text-[11px]" style={{ color: "var(--text-muted)" }}>选择技能后，指令内容会自动同步。也可在「自定义技能」中管理。</span>
+                            </Row>
+                            <Row label="执行指令">
+                              <textarea
+                                value={job.action}
+                                onChange={(e) => { const u = [...schedJobs]; u[idx] = { ...u[idx], action: e.target.value }; setSchedJobs(u); }}
+                                rows={5}
+                                className="w-full rounded-md px-3 py-1.5 text-sm outline-none resize-y"
+                                style={{ background: "var(--bg-primary)", border: "1px solid var(--border)", color: "var(--text-primary)" }}
+                              />
+                            </Row>
+                          </div>
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-2">
+                              <span className="text-xs" style={{ color: "var(--text-muted)" }}>自动执行</span>
+                              <Toggle on={job.auto_execute} onChange={(v) => { const u = [...schedJobs]; u[idx] = { ...u[idx], auto_execute: v }; setSchedJobs(u); }} />
+                            </div>
+                            <button onClick={() => { setSchedJobs(schedJobs.filter((_, i) => i !== idx)); setExpandedJob(null); }}
+                              className="flex items-center gap-1 px-2 py-1 rounded text-xs" style={{ color: "var(--danger)" }}>
+                              <Trash2 size={12} /> 删除
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  );})}
+
+                  <Card title="添加新任务" desc="">
+                    <Row label="任务名称">
+                      <Input value={newJobName} onChange={setNewJobName} placeholder="如：早盘分析" />
+                    </Row>
+                    <Row label="Cron 表达式">
+                      <Input value={newJobCron} onChange={setNewJobCron} placeholder="35 9 * * 1-5（分 时 日 月 周）" />
+                      <div className="mt-1.5 p-2.5 rounded text-[11px] leading-relaxed space-y-1.5" style={{ background: "var(--bg-primary)", border: "1px solid var(--border)", color: "var(--text-muted)" }}>
+                        <p className="font-medium" style={{ color: "var(--text-secondary)" }}>Cron 格式：分 时 日 月 周（5个字段，空格分隔）</p>
+                        <div className="grid grid-cols-5 gap-1 text-center">
+                          {[
+                            { f: "分", r: "0-59" }, { f: "时", r: "0-23" },
+                            { f: "日", r: "1-31" }, { f: "月", r: "1-12" },
+                            { f: "周", r: "0-7*" },
+                          ].map((c) => (
+                            <div key={c.f} className="px-1 py-0.5 rounded" style={{ background: "var(--bg-tertiary)" }}>
+                              <div className="font-medium">{c.f}</div><div>{c.r}</div>
+                            </div>
+                          ))}
+                        </div>
+                        <p>* 周: 0和7=周日, 1-5=周一至周五</p>
+                        <div className="space-y-0.5">
+                          <p className="font-medium" style={{ color: "var(--text-secondary)" }}>常用示例（点击填入）：</p>
+                          {[
+                            { expr: "35 9 * * 1-5", desc: "工作日 9:35" },
+                            { expr: "0 8 * * *", desc: "每天 8:00" },
+                            { expr: "*/30 * * * *", desc: "每 30 分钟" },
+                            { expr: "0 9,18 * * *", desc: "每天 9:00 和 18:00" },
+                            { expr: "0 22 * * 0", desc: "每周日 22:00" },
+                          ].map((ex) => (
+                            <button key={ex.expr} onClick={() => setNewJobCron(ex.expr)}
+                              className="block w-full text-left px-1.5 py-0.5 rounded transition-colors hover:opacity-80"
+                              style={{ background: newJobCron === ex.expr ? "var(--accent)" : "transparent", color: newJobCron === ex.expr ? "white" : "inherit" }}>
+                              <code>{ex.expr}</code> → {ex.desc}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    </Row>
+                    <Row label="关联技能">
+                      <select
+                        value={newJobSkillRef}
+                        onChange={(e) => {
+                          setNewJobSkillRef(e.target.value);
+                          if (e.target.value) {
+                            const skill = userSkills.find(s => s.name === e.target.value);
+                            if (skill) setNewJobAction(skill.content);
+                          }
+                        }}
+                        className="w-full rounded-md px-3 py-1.5 text-sm outline-none appearance-none cursor-pointer"
+                        style={{ background: "var(--bg-primary)", border: "1px solid var(--border)", color: "var(--text-primary)" }}
+                      >
+                        <option value="">不关联（手动输入指令）</option>
+                        {userSkills.map((s) => (
+                          <option key={s.name} value={s.name}>{s.name}</option>
+                        ))}
+                      </select>
+                    </Row>
+                    <Row label="执行指令">
+                      <textarea
+                        value={newJobAction}
+                        onChange={(e) => setNewJobAction(e.target.value)}
+                        placeholder="你是资深投资分析师。请生成早盘分析报告..."
+                        rows={3}
+                        className="w-full rounded-md px-3 py-1.5 text-sm outline-none resize-y"
+                        style={{ background: "var(--bg-primary)", border: "1px solid var(--border)", color: "var(--text-primary)" }}
+                      />
+                    </Row>
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => {
+                          if (!newJobName || !newJobCron || !newJobAction) return;
+                          setSchedJobs([...schedJobs, { name: newJobName, cron: newJobCron, action: newJobAction, auto_execute: true, skill_ref: newJobSkillRef || undefined }]);
+                          setNewJobName(""); setNewJobCron(""); setNewJobAction(""); setNewJobSkillRef("");
+                        }}
+                        disabled={!newJobName || !newJobCron || !newJobAction}
+                        className="flex items-center gap-1 px-3 py-1.5 rounded-md text-xs text-white transition-colors disabled:opacity-50"
+                        style={{ background: "var(--accent)" }}
+                      >
+                        <Plus size={12} /> 添加
+                      </button>
+                      {schedJobs.length === 0 && (
+                        <button
+                          onClick={() => setSchedJobs([
+                            { name: "早盘分析报告", cron: "35 9 * * 1-5", action: "请生成今日早盘分析报告。用 get_market_price 查询 A股（上证指数/沪深300/创业板）、港股（恒生指数）、加密货币（BTC/ETH）、黄金/白银/原油的实时行情，用 search_web 搜索市场新闻，给出各板块操作建议。", auto_execute: true, skill_ref: "投资分析师" },
+                            { name: "午盘总结", cron: "50 11 * * 1-5", action: "请生成午盘总结。查询 A股和港股实时行情，回顾上午走势，给出下午盘操作建议。", auto_execute: true, skill_ref: "投资分析师" },
+                            { name: "尾盘预警", cron: "50 14 * * 1-5", action: "请生成尾盘预警报告。查询 A股全天走势，分析尾盘资金流向，给出收盘预判和明日展望。", auto_execute: true, skill_ref: "投资分析师" },
+                            { name: "收盘日报", cron: "45 15 * * 1-5", action: "请生成收盘日报。查询 A股/港股收盘数据、加密货币/黄金白银原油实时行情、美股盘前信号，给出次日策略。", auto_execute: true, skill_ref: "投资分析师" },
+                            { name: "夜盘分析", cron: "30 22 * * 1-5", action: "请生成夜盘分析报告。查询美股开盘表现、加密货币/黄金白银夜盘实时行情，分析对次日亚太市场影响。", auto_execute: true, skill_ref: "投资分析师" },
+                            { name: "科技日报", cron: "0 8 * * *", action: "请生成今日科技圈早报。用 search_web 搜索最新动态，覆盖 AI/大模型、加密货币/Web3、机器人/自动化、科技公司动态，给出职业发展建议。", auto_execute: true, skill_ref: "科技日报" },
+                          ])}
+                          className="px-3 py-1.5 rounded-md text-xs transition-colors"
+                          style={{ background: "var(--bg-tertiary)", color: "var(--text-secondary)" }}
+                        >
+                          加载默认（投资+科技日报）
+                        </button>
+                      )}
+                    </div>
+                  </Card>
+                </>
+              )}
+            </Section>
+          )}
+
+          {/* ============ 自定义技能 ============ */}
+          {activeTab === "skills" && (
+            <Section title="自定义技能 / 指令" desc="添加命名技能来个性化 AI 助理行为。技能可在定时任务中直接引用，也会注入到系统提示词中。">
+              <Card title="全局自定义指令" desc="始终生效的基础指令（不需要命名，直接生效）">
+                <textarea
+                  value={customInstructions}
+                  onChange={(e) => setCustomInstructions(e.target.value)}
+                  placeholder={"示例：\n- 我是一名程序员，关注AI和加密货币领域\n- 回复风格简洁专业，不要废话"}
+                  rows={4}
+                  className="w-full rounded-md px-3 py-2 text-sm outline-none resize-y"
+                  style={{ background: "var(--bg-primary)", border: "1px solid var(--border)", color: "var(--text-primary)" }}
+                />
+              </Card>
+
+              {userSkills.map((skill, idx) => {
+                const isExpanded = expandedSkill === idx;
+                return (
+                <div key={idx} className="rounded-lg" style={{ background: "var(--bg-secondary)", border: "1px solid var(--border)" }}>
+                  <button
+                    className="w-full flex items-center justify-between p-4 text-left"
+                    onClick={() => setExpandedSkill(isExpanded ? null : idx)}
+                  >
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2">
+                        <Sparkles size={14} style={{ color: "var(--accent)" }} />
+                        <h4 className="text-sm font-medium">{skill.name}</h4>
+                        {skill.always_on && <span className="px-1.5 py-0.5 rounded text-[10px]" style={{ background: "var(--accent)", color: "white", opacity: 0.8 }}>常驻</span>}
+                      </div>
+                      {!isExpanded && (
+                        <p className="text-xs mt-1 truncate" style={{ color: "var(--text-muted)" }}>
+                          {skill.content.slice(0, 80)}{skill.content.length > 80 ? "..." : ""}
+                        </p>
+                      )}
+                    </div>
+                    <ChevronRight size={14} className="shrink-0 ml-2 transition-transform" style={{ transform: isExpanded ? "rotate(90deg)" : "none", color: "var(--text-muted)" }} />
+                  </button>
+                  {isExpanded && (
+                    <div className="px-4 pb-4 space-y-3 border-t" style={{ borderColor: "var(--border)" }}>
+                      <div className="pt-3 space-y-3">
+                        <Row label="技能名称">
+                          <Input value={skill.name} onChange={(v) => { const u = [...userSkills]; u[idx] = { ...u[idx], name: v }; setUserSkills(u); }} />
+                        </Row>
+                        <Row label="触发关键词">
+                          <Input
+                            value={(skill.keywords ?? []).join(", ")}
+                            onChange={(v) => { const u = [...userSkills]; u[idx] = { ...u[idx], keywords: v.split(",").map(s => s.trim()).filter(Boolean) }; setUserSkills(u); }}
+                          />
+                          <span className="text-[11px]" style={{ color: "var(--text-muted)" }}>
+                            逗号分隔。用户消息中包含任一关键词时，此技能会自动激活。留空则根据技能名自动提取。
+                          </span>
+                        </Row>
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs" style={{ color: "var(--text-muted)" }}>始终激活</span>
+                          <Toggle on={skill.always_on ?? false} onChange={(v) => { const u = [...userSkills]; u[idx] = { ...u[idx], always_on: v }; setUserSkills(u); }} />
+                          <span className="text-[11px]" style={{ color: "var(--text-muted)" }}>开启后每次对话都会注入此技能（适合"简洁风格"等全局偏好）</span>
+                        </div>
+                        <Row label="技能内容">
+                          <textarea
+                            value={skill.content}
+                            onChange={(e) => { const u = [...userSkills]; u[idx] = { ...u[idx], content: e.target.value }; setUserSkills(u); }}
+                            rows={6}
+                            className="w-full rounded-md px-3 py-1.5 text-sm outline-none resize-y"
+                            style={{ background: "var(--bg-primary)", border: "1px solid var(--border)", color: "var(--text-primary)" }}
+                          />
+                        </Row>
+                      </div>
+                      <div className="flex justify-between items-center">
+                        <div className="text-[11px]" style={{ color: "var(--text-muted)" }}>
+                          文件: <code className="px-1 py-0.5 rounded" style={{ background: "var(--bg-tertiary)" }}>{skill.name}.md</code>
+                        </div>
+                        <button onClick={async () => {
+                          await invoke("delete_skill", { name: skill.name }).catch(() => {});
+                          setUserSkills(userSkills.filter((_, i) => i !== idx));
+                          setExpandedSkill(null);
+                        }}
+                          className="flex items-center gap-1 px-2 py-1 rounded text-xs" style={{ color: "var(--danger)" }}>
+                          <Trash2 size={12} /> 删除技能
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );})}
+
+              <div
+                className="rounded-lg p-4 space-y-4 transition-colors"
+                style={{
+                  background: dragOver ? "var(--bg-tertiary)" : "var(--bg-secondary)",
+                  border: dragOver ? "2px dashed var(--accent)" : "1px solid var(--border)",
+                }}
+                onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+                onDragLeave={() => setDragOver(false)}
+                onDrop={async (e) => { e.preventDefault(); setDragOver(false); await handleSkillFiles(e.dataTransfer.files); }}
+              >
+                <div>
+                  <h4 className="text-sm font-medium">添加新技能</h4>
+                  <p className="text-[11px] mt-0.5" style={{ color: "var(--text-muted)" }}>手动编写、上传 .md 文件，或拖放文件到此区域</p>
+                </div>
+
+                {dragOver && (
+                  <div className="flex items-center justify-center py-8 rounded-lg" style={{ border: "2px dashed var(--accent)", background: "var(--bg-primary)" }}>
+                    <div className="text-center">
+                      <Upload size={24} className="mx-auto mb-2" style={{ color: "var(--accent)" }} />
+                      <p className="text-sm" style={{ color: "var(--accent)" }}>释放以导入技能文件</p>
+                    </div>
+                  </div>
+                )}
+
+                {!dragOver && (
+                  <>
+                    <input ref={fileInputRef} type="file" accept=".md,.txt" multiple className="hidden"
+                      onChange={async (e) => { await handleSkillFiles(e.target.files); if (fileInputRef.current) fileInputRef.current.value = ""; }} />
+
+                    <Row label="技能名称">
+                      <Input value={newSkillName} onChange={setNewSkillName} placeholder="如：投资分析师、代码审查员、周报生成" />
+                    </Row>
+                    <Row label="触发关键词">
+                      <Input value={newSkillKeywords} onChange={setNewSkillKeywords} placeholder="逗号分隔，如：投资, 股票, A股, 行情" />
+                      <span className="text-[11px]" style={{ color: "var(--text-muted)" }}>
+                        用户消息中包含任一关键词时自动激活此技能。留空则根据技能名自动提取。
+                      </span>
+                    </Row>
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs" style={{ color: "var(--text-muted)" }}>始终激活</span>
+                      <Toggle on={newSkillAlwaysOn} onChange={setNewSkillAlwaysOn} />
+                      <span className="text-[11px]" style={{ color: "var(--text-muted)" }}>开启后每次对话都注入（适合全局偏好类技能）</span>
+                    </div>
+                    <Row label="技能内容">
+                      <textarea
+                        value={newSkillContent}
+                        onChange={(e) => setNewSkillContent(e.target.value)}
+                        placeholder={"# 角色定义\n你是一位 [角色名称]，擅长 [专业领域]。\n\n# 分析框架\n1. [第一步]：...\n2. [第二步]：...\n\n# 输出要求\n- 格式：列表 / 表格\n- 风格：专业简洁"}
+                        rows={8}
+                        className="w-full rounded-md px-3 py-1.5 text-sm outline-none resize-y"
+                        style={{ background: "var(--bg-primary)", border: "1px solid var(--border)", color: "var(--text-primary)" }}
+                      />
+                      <p className="text-[11px] mt-1" style={{ color: "var(--text-muted)" }}>
+                        提示：好的技能应包含 <strong>角色定义</strong>（你是谁）、<strong>分析框架</strong>（怎么做）、<strong>输出要求</strong>（格式/风格）。可点击下方「预填模板」快速开始。
+                      </p>
+                    </Row>
+                    <div className="flex gap-2 flex-wrap">
+                      <button
+                        onClick={async () => {
+                          if (!newSkillName || !newSkillContent) return;
+                          const keywords = newSkillKeywords.split(",").map(s => s.trim()).filter(Boolean);
+                          const skill = { name: newSkillName, content: newSkillContent, keywords: keywords.length > 0 ? keywords : undefined, always_on: newSkillAlwaysOn || undefined };
+                          await invoke("save_skill", { skill }).catch(() => {});
+                          setUserSkills([...userSkills, skill]);
+                          setNewSkillName(""); setNewSkillContent(""); setNewSkillKeywords(""); setNewSkillAlwaysOn(false);
+                        }}
+                        disabled={!newSkillName || !newSkillContent}
+                        className="flex items-center gap-1 px-3 py-1.5 rounded-md text-xs text-white transition-colors disabled:opacity-50"
+                        style={{ background: "var(--accent)" }}
+                      >
+                        <Plus size={12} /> 添加技能
+                      </button>
+                      <button
+                        onClick={() => fileInputRef.current?.click()}
+                        className="flex items-center gap-1 px-3 py-1.5 rounded-md text-xs transition-colors"
+                        style={{ background: "var(--bg-tertiary)", color: "var(--text-secondary)", border: "1px solid var(--border)" }}
+                      >
+                        <Upload size={12} /> 上传 .md 文件
+                      </button>
+                      <button
+                        onClick={() => {
+                          setNewSkillName(newSkillName || "我的新技能");
+                          setNewSkillKeywords(newSkillKeywords || "关键词1, 关键词2, 关键词3");
+                          setNewSkillContent([
+                            "# 角色定义",
+                            "你是一位 [角色名称]，擅长 [专业领域]。",
+                            "",
+                            "# 分析框架",
+                            "分析时请按以下步骤：",
+                            "1. 首先 [第一步]：描述具体分析维度",
+                            "2. 然后 [第二步]：描述下一步操作",
+                            "3. 最后 [第三步]：给出结论或建议",
+                            "",
+                            "# 输出要求",
+                            "- 格式：使用列表和小标题，层次清晰",
+                            "- 风格：专业但易懂，避免废话",
+                            "- 长度：控制在 500 字以内",
+                            "",
+                            "# 特别注意",
+                            "- 数据要基于工具返回的实时结果，不要编造",
+                            "- 给出明确的建议，不要模棱两可",
+                          ].join("\n"));
+                        }}
+                        className="px-3 py-1.5 rounded-md text-xs transition-colors"
+                        style={{ background: "var(--bg-tertiary)", color: "var(--text-secondary)", border: "1px solid var(--border)" }}
+                      >
+                        预填模板
+                      </button>
+                    </div>
+                  </>
+                )}
+              </div>
+
+              <Card title="快速添加模板" desc="一键创建预设技能（含关键词，自动按需激活）">
+                <div className="flex flex-wrap gap-2">
+                  {[
+                    { name: "投资分析师", keywords: ["投资", "股票", "A股", "港股", "美股", "行情", "持仓", "盘", "策略", "黄金", "原油", "加仓", "减仓"], content: "你同时是一位资深投资分析师。分析行情时：\n1. 先看宏观（政策/利率/地缘政治）\n2. 再看技术面（支撑/压力/成交量）\n3. 给出明确的操作建议（建仓/加仓/减仓/观望）和止损位\n\n风格专业但易懂。数据必须来自 get_market_price 工具返回的实时结果。" },
+                    { name: "科技圈观察员", keywords: ["科技", "AI", "大模型", "机器人", "芯片", "Web3", "加密货币", "技术动态"], content: "你同时是一位科技行业分析师。关注领域：AI大模型、加密货币/Web3、机器人/自动化、芯片/半导体。\n\n分析时注意：\n- 技术突破的商业化前景\n- 对行业格局的影响\n- 投资和职业机会" },
+                    { name: "简洁风格", keywords: ["风格"], always_on: true, content: "回复风格要求：\n1. 直接给结论，不要铺垫\n2. 用列表而非段落\n3. 数据要精确\n4. 每次回复控制在 200 字以内" },
+                    { name: "晨间投资简报", keywords: ["投资简报", "晨报", "早盘", "持仓分析"], content: "你是一位资深投资分析师。请按以下框架生成今日投资简报：\n\n## 输出格式\n📊 晨间投资简报 [日期]\n\n### 一句话结论\n[今日最重要的一件事]\n\n### 持仓分析\n对每个持仓标的：\n- 当前价格（用 get_market_price 查询）\n- 过去24h重大消息（用 search_web 搜索）\n- 今日操作建议：持有/加仓/减仓/止损\n\n### 宏观环境\n- 美联储/央行政策动向\n- 重要经济数据\n- 市场情绪指标\n\n### 今日关注点\n1. 🔴 [最重要] ...\n2. 🟡 [次重要] ...\n3. 🟢 [可选关注] ...\n\n⚠️ 以上分析仅供参考，不构成投资建议。" },
+                    { name: "科技日报", keywords: ["科技日报", "科技早报", "技术动态"], content: "你是科技领域资深分析师。请生成今日科技圈早报。\n\n覆盖（用 search_web 搜索最新动态）：\n1. AI/大模型最新进展\n2. 加密货币/Web3 动态\n3. 机器人/自动化技术\n4. 值得关注的科技公司动态\n\n最后给出 1-2 条职业发展建议。" },
+                    { name: "选题推荐", keywords: ["选题", "内容策划", "自媒体"], content: "你是一位内容策划专家，专注技术类自媒体。\n\n## 选题来源\n1. 今日科技/AI热点新闻（用 search_web 搜索）\n2. 常青内容（教程、避坑指南）\n\n## 输出格式\n💡 今日选题推荐\n\n### 热点类（时效性强）\n1. **标题**: [建议标题]\n   平台: B站/小红书/公众号\n   关键词: [SEO关键词]\n   理由: [为什么现在做这个]\n\n### 常青类\n1. **标题**: [建议标题]\n   ...\n\n### 建议优先做\n[选一个最值得做的，给出理由]" },
+                    { name: "周度复盘", keywords: ["周报", "复盘", "周度"], content: "你是个人效率教练。请生成本周复盘报告：\n\n📋 周度综合复盘\n\n### 一、投资周报\n- 本周持仓盈亏汇总\n- 下周关键事件和操作计划\n\n### 二、学习周报\n- 本周学习收获（一句话）\n- 下周学习目标\n\n### 三、综合建议\n按优先级列出下周最重要的 3 件事：\n1. 🔴 ...\n2. 🟡 ...\n3. 🟢 ..." },
+                  ].filter(tpl => !userSkills.some(s => s.name === tpl.name)).map((tpl) => (
+                    <button
+                      key={tpl.name}
+                      onClick={async () => {
+                        await invoke("save_skill", { skill: tpl }).catch(() => {});
+                        setUserSkills([...userSkills, tpl]);
+                      }}
+                      className="px-3 py-1.5 rounded-md text-xs transition-colors"
+                      style={{ background: "var(--bg-tertiary)", color: "var(--text-secondary)", border: "1px solid var(--border)" }}
+                    >
+                      + {tpl.name}
+                    </button>
+                  ))}
+                </div>
+              </Card>
+
+              <div className="p-3 rounded-lg text-xs space-y-1.5" style={{ background: "var(--bg-secondary)", border: "1px solid var(--border)", color: "var(--text-muted)" }}>
+                <p className="font-medium" style={{ color: "var(--text-secondary)" }}>存储说明</p>
+                <p><strong>技能文件:</strong> 每个技能保存为独立 <code className="px-1 py-0.5 rounded text-[11px]" style={{ background: "var(--bg-tertiary)" }}>.md</code> 文件，可直接用编辑器修改</p>
+                <p><strong>技能目录:</strong> <code className="px-1 py-0.5 rounded text-[11px]" style={{ background: "var(--bg-tertiary)" }}>{skillsDir || "加载中..."}</code></p>
+                <p><strong>主配置:</strong> 定时任务、模型等保存在 <code className="px-1 py-0.5 rounded text-[11px]" style={{ background: "var(--bg-tertiary)" }}>auto-crab.toml</code>（同目录）</p>
+                <p><strong>全局指令:</strong> 始终注入到系统提示词，影响所有对话和定时任务</p>
+                <p><strong>命名技能:</strong> 可在定时任务中通过下拉选择引用，也会注入到系统提示词</p>
+              </div>
+            </Section>
+          )}
+
           {/* ============ 密钥管理 ============ */}
           {activeTab === "credentials" && (
-            <Section title="密钥管理" desc="所有 API 密钥安全存储在系统密钥链中（Windows Credential Store / macOS Keychain / Linux Secret Service），不存储在配置文件中。">
+            <Section title="密钥管理" desc="分类管理所有 API 密钥。系统密钥链中的凭据安全加密存储，搜索 API 密钥保存在配置文件中。">
+              {/* ── 大模型 API ── */}
+              <Card title="🤖 大模型 API" desc="AI 对话所需的 LLM 服务密钥（存储在系统密钥链中）">
+                <div className="space-y-1.5">
+                  {[
+                    { key: "deepseek", label: "DeepSeek" },
+                    { key: "dashscope", label: "通义千问 (DashScope)" },
+                    { key: "zhipu", label: "智谱 (GLM)" },
+                    { key: "moonshot", label: "Kimi (Moonshot)" },
+                    { key: "openai", label: "OpenAI" },
+                    { key: "anthropic", label: "Anthropic (Claude)" },
+                  ].map(({ key: k, label }) => (
+                    <CredentialRow key={k} name={k} exists={credentialStatuses[k]} onEdit={(name) => {
+                      setKeyName(name);
+                      setApiKeyInput("");
+                      setSaveMsg("");
+                    }} />
+                  ))}
+                </div>
+              </Card>
+
+              {/* ── 搜索引擎 API ── */}
+              <Card title="🔍 搜索引擎 API" desc="用于全球搜索，未配置时使用免费的 DuckDuckGo 爬虫兜底">
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between p-2 rounded" style={{ background: "var(--bg-tertiary)" }}>
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs font-medium" style={{ color: "var(--text-primary)" }}>Brave Search</span>
+                      <span className={`text-[10px] px-1.5 py-0.5 rounded`}
+                        style={{ background: braveApiKey ? 'rgba(34,197,94,0.15)' : 'rgba(128,128,128,0.15)', color: braveApiKey ? '#22c55e' : '#9ca3af' }}>
+                        {braveApiKey ? '已配置' : '未配置'}
+                      </span>
+                    </div>
+                    {searchStats?.brave && (
+                      <div className="text-[11px]" style={{ color: "var(--text-muted)" }}>
+                        本月: {searchStats.brave.used}/{searchStats.brave.quota}
+                        <span className="ml-1" style={{ color: searchStats.brave.remaining > 100 ? '#22c55e' : '#ef4444' }}>
+                          (剩余 {searchStats.brave.remaining})
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                  <div className="flex items-center justify-between p-2 rounded" style={{ background: "var(--bg-tertiary)" }}>
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs font-medium" style={{ color: "var(--text-primary)" }}>SerpApi (Google)</span>
+                      <span className={`text-[10px] px-1.5 py-0.5 rounded`}
+                        style={{ background: serpapiApiKey ? 'rgba(34,197,94,0.15)' : 'rgba(128,128,128,0.15)', color: serpapiApiKey ? '#22c55e' : '#9ca3af' }}>
+                        {serpapiApiKey ? '已配置' : '未配置'}
+                      </span>
+                    </div>
+                    {searchStats?.serpapi && (
+                      <div className="text-[11px]" style={{ color: "var(--text-muted)" }}>
+                        本月: {searchStats.serpapi.used}/{searchStats.serpapi.quota}
+                        <span className="ml-1" style={{ color: searchStats.serpapi.remaining > 50 ? '#22c55e' : '#ef4444' }}>
+                          (剩余 {searchStats.serpapi.remaining})
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                  <div className="flex items-center justify-between p-2 rounded" style={{ background: "var(--bg-tertiary)" }}>
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs font-medium" style={{ color: "var(--text-primary)" }}>Tavily</span>
+                      <span className={`text-[10px] px-1.5 py-0.5 rounded`}
+                        style={{ background: tavilyApiKey ? 'rgba(34,197,94,0.15)' : 'rgba(128,128,128,0.15)', color: tavilyApiKey ? '#22c55e' : '#9ca3af' }}>
+                        {tavilyApiKey ? '已配置' : '未配置'}
+                      </span>
+                    </div>
+                    {searchStats?.tavily && (
+                      <div className="text-[11px]" style={{ color: "var(--text-muted)" }}>
+                        本月: {searchStats.tavily.used}/{searchStats.tavily.quota}
+                        <span className="ml-1" style={{ color: searchStats.tavily.remaining > 100 ? '#22c55e' : '#ef4444' }}>
+                          (剩余 {searchStats.tavily.remaining})
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+                <p className="text-[11px] mt-2" style={{ color: "var(--text-muted)" }}>
+                  搜索 API Key 在「工具权限」标签页配置。搜索优先级：Tavily → SerpApi (Google) → Brave → DuckDuckGo → SearXNG
+                </p>
+              </Card>
+
+              {/* ── 远程控制 ── */}
+              <Card title="🔗 远程控制" desc="飞书、企业微信等集成所需的密钥（存储在系统密钥链中）">
+                <div className="space-y-1.5">
+                  {[
+                    { key: "feishu-secret", label: "飞书 App Secret" },
+                    { key: "wechat-work-secret", label: "企业微信 Secret" },
+                  ].map(({ key: k }) => (
+                    <CredentialRow key={k} name={k} exists={credentialStatuses[k]} onEdit={(name) => {
+                      setKeyName(name);
+                      setApiKeyInput("");
+                      setSaveMsg("");
+                    }} />
+                  ))}
+                </div>
+              </Card>
+
+              {/* ── 添加/更新 ── */}
               <Card title="添加 / 更新密钥" desc="将 API Key 安全存储到系统密钥链">
                 <Row label="密钥名称">
-                  <Select
+                  <select
                     value={keyName}
-                    onChange={setKeyName}
-                    options={[
-                      { value: "", label: "选择或输入..." },
-                      { value: "dashscope", label: "dashscope (通义千问)" },
-                      { value: "deepseek", label: "deepseek" },
-                      { value: "zhipu", label: "zhipu (智谱)" },
-                      { value: "moonshot", label: "moonshot (Kimi)" },
-                      { value: "openai", label: "openai" },
-                      { value: "anthropic", label: "anthropic (Claude)" },
-                      { value: "feishu-secret", label: "feishu-secret (飞书)" },
-                      { value: "wechat-work-secret", label: "wechat-work-secret (企业微信)" },
-                    ]}
-                  />
+                    onChange={(e) => setKeyName(e.target.value)}
+                    className="w-full rounded-md px-3 py-1.5 text-sm outline-none appearance-none cursor-pointer"
+                    style={{
+                      background: "var(--bg-primary)",
+                      border: "1px solid var(--border)",
+                      color: "var(--text-primary)",
+                      backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E")`,
+                      backgroundRepeat: "no-repeat",
+                      backgroundPosition: "right 10px center",
+                      paddingRight: "32px",
+                    }}
+                  >
+                    <option value="">选择密钥...</option>
+                    <optgroup label="🤖 大模型 API">
+                      <option value="deepseek">deepseek</option>
+                      <option value="dashscope">dashscope (通义千问)</option>
+                      <option value="zhipu">zhipu (智谱)</option>
+                      <option value="moonshot">moonshot (Kimi)</option>
+                      <option value="openai">openai</option>
+                      <option value="anthropic">anthropic (Claude)</option>
+                    </optgroup>
+                    <optgroup label="🔗 远程控制">
+                      <option value="feishu-secret">feishu-secret (飞书)</option>
+                      <option value="wechat-work-secret">wechat-work-secret (企业微信)</option>
+                    </optgroup>
+                  </select>
                 </Row>
                 <Row label="API Key">
                   <input
@@ -578,25 +1275,12 @@ export function SettingsView() {
                 </div>
               </Card>
 
-              <Card title="已保存的密钥" desc="系统密钥链中当前存在的凭据">
-                <div className="space-y-1.5">
-                  {["dashscope", "deepseek", "zhipu", "moonshot", "openai", "anthropic", "feishu-secret", "wechat-work-secret"].map((k) => (
-                    <CredentialRow key={k} name={k} exists={credentialStatuses[k]} onEdit={(name, currentPreview) => {
-                      setKeyName(name);
-                      setApiKeyInput("");
-                      setSaveMsg(currentPreview ? `当前值: ${currentPreview}（输入新值将覆盖）` : "");
-                    }} />
-                  ))}
-                </div>
-              </Card>
-
-              <Card title="说明" desc="">
-                <div className="text-xs leading-5 space-y-1" style={{ color: "var(--text-muted)" }}>
-                  <p>• 密钥存储在操作系统级别的加密存储中，不会出现在配置文件里</p>
-                  <p>• 配置文件中使用 <code className="px-1 py-0.5 rounded text-[11px]" style={{ background: "var(--bg-tertiary)" }}>keychain://名称</code> 引用密钥</p>
-                  <p>• 更新密钥只需使用相同的名称重新保存即可覆盖</p>
-                </div>
-              </Card>
+              <div className="text-xs leading-5 space-y-1 p-3 rounded-lg" style={{ background: "var(--bg-secondary)", border: "1px solid var(--border)", color: "var(--text-muted)" }}>
+                <p className="font-medium" style={{ color: "var(--text-secondary)" }}>存储说明</p>
+                <p>• <strong>大模型/远程控制密钥</strong>：存储在操作系统级加密存储中（Windows Credential Store），不会出现在配置文件里</p>
+                <p>• <strong>搜索 API 密钥</strong>：保存在 <code className="px-1 py-0.5 rounded text-[11px]" style={{ background: "var(--bg-tertiary)" }}>auto-crab.toml</code> 配置文件的 <code>[search]</code> 段</p>
+                <p>• 更新密钥只需使用相同的名称重新保存即可覆盖</p>
+              </div>
             </Section>
           )}
 
