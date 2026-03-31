@@ -20,6 +20,8 @@ pub struct AppConfig {
     pub scheduled_tasks: ScheduledTasksConfig,
     #[serde(default)]
     pub search: SearchConfig,
+    #[serde(default)]
+    pub knowledge: KnowledgeConfig,
 }
 
 impl AppConfig {
@@ -310,6 +312,44 @@ impl Default for SearchConfig {
 fn default_serpapi_quota() -> u32 { 250 }
 fn default_brave_quota() -> u32 { 1000 }
 fn default_tavily_quota() -> u32 { 1000 }
+
+/// Knowledge base integration (e.g. Obsidian) for persisting daily reports
+/// and enabling weekly summaries. Supports routing different content types
+/// to different subdirectories within the vault.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KnowledgeConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Root path of the knowledge base (e.g. C:/Workspace/AI-Assistant/self-rag)
+    #[serde(default)]
+    pub vault_path: String,
+    /// Also save outputs from interactive conversations (not just scheduled tasks)
+    #[serde(default)]
+    pub save_conversations: bool,
+    /// Directory routing: map content categories to subdirectories.
+    /// Keys are category keywords, values are subdirectory paths relative to vault_path.
+    #[serde(default = "default_vault_routing")]
+    pub routing: HashMap<String, String>,
+}
+
+impl Default for KnowledgeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            vault_path: String::new(),
+            save_conversations: false,
+            routing: default_vault_routing(),
+        }
+    }
+}
+
+fn default_vault_routing() -> HashMap<String, String> {
+    let mut m = HashMap::new();
+    m.insert("invest".into(), "invest-explore".into());
+    m.insert("boss".into(), "boss-explore".into());
+    m.insert("news".into(), "hot-news".into());
+    m
+}
 
 fn default_search_provider() -> String {
     "auto".into()

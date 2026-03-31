@@ -34,6 +34,9 @@ pub trait EventSink: Send + Sync {
     fn on_error(&self, error: &str, stream_id: &str);
     fn on_done(&self, stream_id: &str);
     async fn request_approval(&self, tool: &str, args: &str, risk: &str, stream_id: &str, step_id: &str) -> bool;
+    /// Whether this sink needs streaming UX. Remote sinks (Feishu etc.) return false
+    /// to skip redundant LLM calls when content is already available.
+    fn needs_streaming(&self) -> bool { true }
 }
 
 // ── Agent engine config ─────────────────────────────────────────────
@@ -105,12 +108,19 @@ impl AgentEngine {
     ) -> String {
         let mut messages = messages;
 
-        // RAG: recall relevant memories and inject into context
+        // RAG: recall relevant memories (with timeout to avoid blocking)
         if let Some(ref mem) = agent_cfg.memory {
             if let Some(user_msg) = messages.last() {
-                if user_msg.role == MessageRole::User && !user_msg.content.is_empty() {
-                    match mem.recall(&user_msg.content, Some(3)).await {
-                        Ok(recalls) if !recalls.is_empty() => {
+                let msg_len = user_msg.content.chars().count();
+                // Skip memory recall for very short messages (greetings, commands, etc.)
+                if user_msg.role == MessageRole::User && msg_len > 10 {
+                    let recall_start = std::time::Instant::now();
+                    // 3s timeout — don't let slow embedding API block the conversation
+                    match tokio::time::timeout(
+                        std::time::Duration::from_secs(3),
+                        mem.recall(&user_msg.content, Some(3))
+                    ).await {
+                        Ok(Ok(recalls)) if !recalls.is_empty() => {
                             let memory_context = format!(
                                 "以下是与当前对话相关的历史记忆（供参考，不要逐条复述）：\n{}",
                                 recalls.join("\n")
@@ -120,9 +130,17 @@ impl AgentEngine {
                                 content: memory_context,
                                 name: None, tool_calls: None, tool_call_id: None,
                             });
-                            tracing::info!("[Memory] Injected {} relevant memories", recalls.len());
+                            tracing::info!("[Memory] Injected {} memories in {:.1}s", recalls.len(), recall_start.elapsed().as_secs_f64());
                         }
-                        _ => {}
+                        Ok(Ok(_)) => {
+                            tracing::info!("[Memory] No relevant memories (took {:.1}s)", recall_start.elapsed().as_secs_f64());
+                        }
+                        Ok(Err(e)) => {
+                            tracing::warn!("[Memory] Recall error (took {:.1}s): {}", recall_start.elapsed().as_secs_f64(), e);
+                        }
+                        Err(_) => {
+                            tracing::warn!("[Memory] Recall timed out after 3s, skipping");
+                        }
                     }
                 }
             }
@@ -218,6 +236,17 @@ impl AgentEngine {
             }
 
             if !content.is_empty() {
+                // For remote sinks (Feishu etc.): if we already have final content and
+                // there were tool calls in history, we still need stream_final_answer
+                // to reformat tool data cleanly. But if no tools were used at all,
+                // skip the redundant second LLM call entirely.
+                let had_tools = messages.iter().any(|m| m.role == MessageRole::Tool);
+                if !sink.needs_streaming() && !had_tools {
+                    tracing::info!("[Engine] Remote sink: returning content directly (skipping stream_final_answer)");
+                    sink.on_final_answer(&content, stream_id);
+                    sink.on_done(stream_id);
+                    return content;
+                }
                 return self.stream_final_answer(&messages, sink, stream_id).await;
             }
 
@@ -884,6 +913,7 @@ impl EventSink for StringCollectorSink {
     }
     fn on_done(&self, _stream_id: &str) {}
     async fn request_approval(&self, _tool: &str, _args: &str, _risk: &str, _stream_id: &str, _step_id: &str) -> bool {
-        true // Remote: auto-approve (approval handled via /approve command)
+        true
     }
+    fn needs_streaming(&self) -> bool { false }
 }

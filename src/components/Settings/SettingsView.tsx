@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open as dialogOpen } from "@tauri-apps/plugin-dialog";
-import { Save, Key, Shield, Bot, Globe, Terminal, ChevronRight, Loader2, FolderOpen, Clock, Sparkles, Plus, Trash2, Upload } from "lucide-react";
+import { Save, Key, Shield, Bot, Globe, Terminal, ChevronRight, Loader2, FolderOpen, Clock, Sparkles, Plus, Trash2, Upload, BookOpen } from "lucide-react";
 
 const PROVIDERS = [
   { value: "", label: "未配置" },
@@ -90,6 +90,16 @@ export function SettingsView() {
   const [braveApiKey, setBraveApiKey] = useState("");
   const [tavilyApiKey, setTavilyApiKey] = useState("");
   const [searchStats, setSearchStats] = useState<any>(null);
+
+  const [knowledgeEnabled, setKnowledgeEnabled] = useState(false);
+  const [vaultPath, setVaultPath] = useState("");
+  const [vaultSaveConversations, setVaultSaveConversations] = useState(false);
+  const [vaultRouting, setVaultRouting] = useState<Record<string, string>>({
+    invest: "invest-explore",
+    boss: "boss-explore",
+    news: "hot-news",
+    default: "general",
+  });
 
   const [remoteEnabled, setRemoteEnabled] = useState(false);
   const [feishuAppId, setFeishuAppId] = useState("");
@@ -182,6 +192,12 @@ export function SettingsView() {
         setSerpapiApiKey(cfg.search.serpapi_api_key ?? "");
         setBraveApiKey(cfg.search.brave_api_key ?? "");
         setTavilyApiKey(cfg.search.tavily_api_key ?? "");
+      }
+      if (cfg.knowledge) {
+        setKnowledgeEnabled(cfg.knowledge.enabled ?? false);
+        setVaultPath(cfg.knowledge.vault_path ?? "");
+        setVaultSaveConversations(cfg.knowledge.save_conversations ?? false);
+        if (cfg.knowledge.routing) setVaultRouting(cfg.knowledge.routing);
       }
       if (cfg.remote) {
         setRemoteEnabled(cfg.remote.enabled ?? false);
@@ -295,6 +311,12 @@ export function SettingsView() {
           brave_api_key: braveApiKey,
           tavily_api_key: tavilyApiKey,
         },
+        knowledge: {
+          enabled: knowledgeEnabled,
+          vault_path: vaultPath,
+          save_conversations: vaultSaveConversations,
+          routing: vaultRouting,
+        },
       };
       await invoke("save_config", { configData: cfg });
 
@@ -330,6 +352,7 @@ export function SettingsView() {
     { id: "security", label: "安全设置", icon: Shield },
     { id: "tools", label: "工具权限", icon: Terminal },
     { id: "remote", label: "远程控制", icon: Globe },
+    { id: "knowledge", label: "知识库", icon: BookOpen },
     { id: "schedule", label: "定时任务", icon: Clock },
     { id: "skills", label: "自定义技能", icon: Sparkles },
     { id: "credentials", label: "密钥管理", icon: Key },
@@ -669,6 +692,69 @@ export function SettingsView() {
                   </Card>
                 </>
               )}
+            </Section>
+          )}
+
+          {/* ============ 知识库 ============ */}
+          {activeTab === "knowledge" && (
+            <Section title="知识库集成" desc="将日报、分析报告、对话产出自动保存到 Obsidian 知识库，按类型智能分类，实现持久化积累与周度回顾。">
+              <Card title="知识库配置" desc="连接你的 Obsidian Vault，报告将自动按类型归档">
+                <Row label="启用知识库同步">
+                  <Toggle on={knowledgeEnabled} onChange={setKnowledgeEnabled} />
+                </Row>
+                <Row label="知识库根目录">
+                  <div className="flex gap-2">
+                    <Input value={vaultPath} onChange={setVaultPath} placeholder="C:/Workspace/AI-Assistant/self-rag" />
+                    <button
+                      onClick={async () => {
+                        const dir = await dialogOpen({ directory: true, title: "选择知识库根目录" });
+                        if (dir) setVaultPath(dir as string);
+                      }}
+                      className="px-3 py-1.5 rounded-md text-xs whitespace-nowrap"
+                      style={{ background: "var(--bg-tertiary)", color: "var(--text-secondary)", border: "1px solid var(--border)" }}
+                    >
+                      <FolderOpen size={14} />
+                    </button>
+                  </div>
+                </Row>
+                <Row label="保存对话内容">
+                  <div className="flex items-center gap-2">
+                    <Toggle on={vaultSaveConversations} onChange={setVaultSaveConversations} />
+                    <span className="text-[11px]" style={{ color: "var(--text-muted)" }}>主动对话中的重要产出也存入知识库</span>
+                  </div>
+                </Row>
+              </Card>
+
+              <Card title="智能分类路由" desc="不同类型的内容自动归档到对应目录">
+                <div className="space-y-2">
+                  {[
+                    { key: "invest", icon: "📈", label: "投资/理财", desc: "投资简报、盘面分析、行情日报" },
+                    { key: "boss", icon: "💡", label: "创业/副业", desc: "创业灵感、商业机会分析" },
+                    { key: "news", icon: "📰", label: "科技/热点", desc: "科技日报、选题推荐、热点新闻" },
+                    { key: "default", icon: "📁", label: "其他/通用", desc: "未匹配到上述类别的内容" },
+                  ].map(item => (
+                    <div key={item.key} className="flex items-center gap-3 p-2 rounded" style={{ background: "var(--bg-tertiary)" }}>
+                      <span className="text-lg">{item.icon}</span>
+                      <div className="flex-1 min-w-0">
+                        <div className="text-xs font-medium" style={{ color: "var(--text-primary)" }}>{item.label}</div>
+                        <div className="text-[10px]" style={{ color: "var(--text-muted)" }}>{item.desc}</div>
+                      </div>
+                      <span className="text-[11px] font-mono px-2 py-0.5 rounded" style={{ background: "var(--bg-primary)", color: "var(--accent)" }}>
+                        {vaultRouting[item.key] || (item.key === "invest" ? "invest-explore" : item.key === "boss" ? "boss-explore" : item.key === "news" ? "hot-news" : "general")}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </Card>
+
+              <div className="text-xs leading-5 space-y-1 p-3 rounded-lg" style={{ background: "var(--bg-secondary)", border: "1px solid var(--border)", color: "var(--text-muted)" }}>
+                <p className="font-medium" style={{ color: "var(--text-secondary)" }}>工作方式</p>
+                <p>• 每次定时任务产出后，根据任务类型自动存入对应目录</p>
+                <p>• 文件结构：<code className="px-1 py-0.5 rounded text-[11px]" style={{ background: "var(--bg-tertiary)" }}>invest-explore/2026-03-28/0935-晨间投资简报.md</code></p>
+                <p>• 每个文件带 YAML frontmatter（date/tags/category），Obsidian 可直接检索和关联</p>
+                <p>• 周度复盘自动读取三个目录的近 7 天笔记，生成综合分析报告</p>
+                <p>• 支持 Obsidian、Logseq 或任何基于 Markdown 文件的知识库工具</p>
+              </div>
             </Section>
           )}
 

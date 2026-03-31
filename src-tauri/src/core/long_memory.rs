@@ -75,7 +75,7 @@ impl LongTermMemory {
 
     async fn get_embedding(&self, text: &str) -> Result<Vec<f32>> {
         let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(15))
+            .timeout(std::time::Duration::from_secs(5))
             .build()?;
 
         let body = serde_json::json!({

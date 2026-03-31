@@ -206,6 +206,24 @@ pub async fn get_search_usage_stats() -> ApiResult<serde_json::Value> {
     }))
 }
 
+/// Save content to the Obsidian knowledge vault from the frontend.
+#[tauri::command]
+pub async fn save_to_knowledge_base(
+    app: AppHandle,
+    title: String,
+    content: String,
+) -> ApiResult<String> {
+    let cfg = match config::load_config(&app).await {
+        Ok(c) => c,
+        Err(e) => return ApiResult::err(format!("Config error: {}", e)),
+    };
+    if !cfg.knowledge.enabled || cfg.knowledge.vault_path.is_empty() {
+        return ApiResult::err("知识库未启用或路径未配置");
+    }
+    crate::save_to_vault(&cfg.knowledge, &title, &content);
+    ApiResult::ok("已保存到知识库".into())
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ChatSendRequest {
     pub message: String,
@@ -1894,11 +1912,23 @@ async fn fetch_hk_stock(symbol: &str, display: &str) -> anyhow::Result<String> {
     format_tencent_stock(&data, display, "港股", "腾讯股票API")
 }
 
-/// US stocks via Tencent Stock API
+/// US stocks via Tencent Stock API, with Yahoo Finance fallback for indices
 async fn fetch_us_stock(symbol: &str, display: &str) -> anyhow::Result<String> {
-    // For index codes starting with "b_", use Sina Finance
     if symbol.starts_with("b_") {
-        return fetch_sina_index(symbol, display).await;
+        // Try Sina first
+        if let Ok(result) = fetch_sina_index(symbol, display).await {
+            return Ok(result);
+        }
+        let name = display;
+        tracing::warn!("[Market] Sina failed for {}, trying Yahoo Finance", name);
+        // Fallback: Yahoo Finance (more reliable for international indices)
+        let yahoo_sym = match &symbol[2..] {
+            "GSPC" => "^GSPC",
+            "DJI" => "^DJI",
+            "IXIC" => "^IXIC",
+            other => other,
+        };
+        return fetch_yahoo_index(yahoo_sym, display).await;
     }
     let data = fetch_tencent_stock(symbol).await?;
     format_tencent_stock(&data, display, "美股", "腾讯股票API")
@@ -1906,7 +1936,15 @@ async fn fetch_us_stock(symbol: &str, display: &str) -> anyhow::Result<String> {
 
 /// JP stocks via Sina Finance (international indices/stocks)
 async fn fetch_jp_stock(symbol: &str, display: &str) -> anyhow::Result<String> {
-    fetch_sina_index(symbol, display).await
+    if let Ok(result) = fetch_sina_index(symbol, display).await {
+        return Ok(result);
+    }
+    // Fallback: Yahoo Finance
+    let yahoo_sym = match symbol {
+        "b_N225" => "^N225",
+        _ => return Err(anyhow::anyhow!("{} 获取失败：所有数据源均不可用", display)),
+    };
+    fetch_yahoo_index(yahoo_sym, display).await
 }
 
 /// Commodity: Tencent SGE (stable) → Sina futures → error
@@ -2194,6 +2232,62 @@ async fn fetch_sina_index(symbol: &str, display: &str) -> anyhow::Result<String>
 涨跌: {change_f:+.2} ({change_pct:+.2}%) {emoji}\n\
 更新时间: {time_str}\n\
 数据来源: 新浪财经",
+    ))
+}
+
+/// Fetch index data from Yahoo Finance v8 chart API (free, no key required).
+async fn fetch_yahoo_index(yahoo_symbol: &str, display: &str) -> anyhow::Result<String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(12))
+        .build()?;
+
+    let url = format!(
+        "https://query1.finance.yahoo.com/v8/finance/chart/{}?interval=1d&range=1d",
+        urlencoding::encode(yahoo_symbol)
+    );
+
+    let resp = client
+        .get(&url)
+        .header("User-Agent", "Mozilla/5.0")
+        .send()
+        .await?;
+
+    let data: serde_json::Value = resp.json().await?;
+    let result = &data["chart"]["result"];
+    if !result.is_array() || result.as_array().map(|a| a.is_empty()).unwrap_or(true) {
+        anyhow::bail!("Yahoo Finance 无数据: {}", display);
+    }
+
+    let item = &result[0];
+    let meta = &item["meta"];
+    let current = meta["regularMarketPrice"].as_f64().unwrap_or(0.0);
+    let prev_close = meta["chartPreviousClose"].as_f64()
+        .or_else(|| meta["previousClose"].as_f64())
+        .unwrap_or(0.0);
+
+    if current == 0.0 {
+        anyhow::bail!("Yahoo Finance 返回无效价格: {}", display);
+    }
+
+    let change = current - prev_close;
+    let change_pct = if prev_close > 0.0 { change / prev_close * 100.0 } else { 0.0 };
+    let emoji = if change > 0.0 { "📈" } else if change < 0.0 { "📉" } else { "➡️" };
+
+    let market_state = meta["marketState"].as_str().unwrap_or("UNKNOWN");
+    let state_text = match market_state {
+        "REGULAR" => "交易中",
+        "PRE" => "盘前",
+        "POST" | "POSTPOST" => "盘后",
+        "CLOSED" => "已收盘",
+        _ => market_state,
+    };
+
+    Ok(format!(
+        "{emoji} {display} 实时行情\n\
+        当前点位: {current:.2}\n\
+        涨跌: {change:+.2} ({change_pct:+.2}%) {emoji}\n\
+        市场状态: {state_text}\n\
+        数据来源: Yahoo Finance",
     ))
 }
 

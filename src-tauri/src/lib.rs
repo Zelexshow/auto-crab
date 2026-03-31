@@ -387,6 +387,7 @@ fn match_skills<'a>(skills: &'a [config::UserSkill], user_input: Option<&str>) -
 /// If the action mentions investment/market keywords, fetches real-time prices
 /// and news, then injects them into the prompt so the LLM has actual data.
 async fn enrich_scheduled_action(action: &str) -> String {
+    let enrich_start = std::time::Instant::now();
     let lower = action.to_lowercase();
 
     let is_investment = lower.contains("投资") || lower.contains("行情") || lower.contains("盯盘")
@@ -394,7 +395,8 @@ async fn enrich_scheduled_action(action: &str) -> String {
         || lower.contains("金融") || lower.contains("交易");
 
     let is_learning = lower.contains("学习") || lower.contains("科技") || lower.contains("技术动态")
-        || lower.contains("tech") || lower.contains("职业");
+        || lower.contains("tech") || lower.contains("职业") || lower.contains("创业")
+        || lower.contains("startup");
 
     if !is_investment && !is_learning {
         return action.to_string();
@@ -404,8 +406,7 @@ async fn enrich_scheduled_action(action: &str) -> String {
     let mut sections: Vec<String> = Vec::new();
 
     if is_investment {
-        // Pre-fetch market data for all key assets
-        let assets = vec![
+        let assets: Vec<(&str, &str)> = vec![
             ("上证指数", "上证指数"), ("沪深300", "沪深300"), ("创业板", "创业板"),
             ("恒生指数", "恒生指数"),
             ("纳指", "纳指"), ("道指", "道指"), ("标普", "标普"),
@@ -415,51 +416,97 @@ async fn enrich_scheduled_action(action: &str) -> String {
             ("美元人民币", "美元人民币"),
         ];
 
-        let mut price_data = Vec::new();
-        for (label, query) in &assets {
-            match commands::fetch_market_price_pub(query).await {
-                Ok(info) => {
-                    let brief: String = info.lines().take(4).collect::<Vec<_>>().join(" | ");
-                    price_data.push(format!("• {}: {}", label, brief));
+        // Parallel fetch with automatic retry on failure
+        let futures: Vec<_> = assets.iter().map(|(label, query)| {
+            let label = label.to_string();
+            let query = query.to_string();
+            async move {
+                for attempt in 0..2 {
+                    if attempt > 0 {
+                        tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+                    }
+                    match commands::fetch_market_price_pub(&query).await {
+                        Ok(info) => {
+                            let brief: String = info.lines().take(4).collect::<Vec<_>>().join(" | ");
+                            return format!("• {}: {}", label, brief);
+                        }
+                        Err(e) => {
+                            if attempt == 0 {
+                                tracing::warn!("Price fetch failed for '{}' (attempt 1): {}, retrying...", label, e);
+                            } else {
+                                tracing::warn!("Price fetch failed for '{}' (attempt 2): {}", label, e);
+                            }
+                        }
+                    }
                 }
-                Err(_) => price_data.push(format!("• {}: 暂无数据", label)),
+                format!("• {}: 暂无数据", label)
             }
-        }
+        }).collect();
+
+        let price_data: Vec<String> = futures::future::join_all(futures).await;
         sections.push(format!("【实时行情数据 ({})】\n{}", now, price_data.join("\n")));
 
-        // Fetch financial news
-        let news_queries = vec!["A股市场今日要闻", "美股科技股最新动态", "加密货币市场新闻"];
-        let mut news_data = Vec::new();
-        for nq in &news_queries {
-            match commands::search_web_pub(nq).await {
-                Ok(results) => {
-                    let brief: String = results.chars().take(500).collect();
-                    news_data.push(format!("[{}]\n{}", nq, brief));
+        // Parallel news fetch (3 queries simultaneously)
+        let news_queries = vec![
+            "stock market China A-share news today",
+            "US tech stocks NASDAQ latest",
+            "Bitcoin crypto market news",
+        ];
+        let news_futures: Vec<_> = news_queries.iter().map(|nq| {
+            let nq = nq.to_string();
+            async move {
+                match commands::search_web_pub(&nq).await {
+                    Ok(results) => {
+                        let brief: String = results.chars().take(500).collect();
+                        Some(format!("[{}]\n{}", nq, brief))
+                    }
+                    Err(e) => {
+                        tracing::warn!("Scheduled search failed for '{}': {}", nq, e);
+                        None
+                    }
                 }
-                Err(_) => {}
             }
-        }
+        }).collect();
+
+        let news_results = futures::future::join_all(news_futures).await;
+        let news_data: Vec<String> = news_results.into_iter().flatten().collect();
         if !news_data.is_empty() {
             sections.push(format!("【市场新闻动态】\n{}", news_data.join("\n\n")));
         }
     }
 
     if is_learning {
-        let tech_queries = vec!["AI人工智能最新进展", "加密货币区块链最新动态", "机器人技术突破"];
-        let mut tech_data = Vec::new();
-        for tq in &tech_queries {
-            match commands::search_web_pub(tq).await {
-                Ok(results) => {
-                    let brief: String = results.chars().take(500).collect();
-                    tech_data.push(format!("[{}]\n{}", tq, brief));
+        let tech_queries = vec![
+            "AI large language model news today",
+            "Web3 crypto blockchain latest",
+            "robotics automation technology news",
+            "tech company Apple Google Tesla news",
+        ];
+        let tech_futures: Vec<_> = tech_queries.iter().map(|tq| {
+            let tq = tq.to_string();
+            async move {
+                match commands::search_web_pub(&tq).await {
+                    Ok(results) => {
+                        let brief: String = results.chars().take(500).collect();
+                        Some(format!("[{}]\n{}", tq, brief))
+                    }
+                    Err(e) => {
+                        tracing::warn!("Scheduled search failed for '{}': {}", tq, e);
+                        None
+                    }
                 }
-                Err(_) => {}
             }
-        }
+        }).collect();
+
+        let tech_results = futures::future::join_all(tech_futures).await;
+        let tech_data: Vec<String> = tech_results.into_iter().flatten().collect();
         if !tech_data.is_empty() {
             sections.push(format!("【科技圈最新动态 ({})】\n{}", now, tech_data.join("\n\n")));
         }
     }
+
+    let enrich_elapsed = enrich_start.elapsed();
+    tracing::info!("[Enrich] Data pre-fetch completed in {:.1}s ({} sections)", enrich_elapsed.as_secs_f64(), sections.len());
 
     if sections.is_empty() {
         return action.to_string();
@@ -470,6 +517,77 @@ async fn enrich_scheduled_action(action: &str) -> String {
         action,
         sections.join("\n\n")
     )
+}
+
+/// Route content to the correct subdirectory based on task name keywords.
+pub fn resolve_vault_subdir(knowledge: &config::KnowledgeConfig, task_name: &str) -> String {
+    let lower = task_name.to_lowercase();
+
+    // Investment-related
+    if lower.contains("投资") || lower.contains("行情") || lower.contains("盘")
+        || lower.contains("invest") || lower.contains("理财") || lower.contains("简报") {
+        return knowledge.routing.get("invest")
+            .cloned().unwrap_or_else(|| "invest-explore".into());
+    }
+    // Entrepreneurship-related
+    if lower.contains("创业") || lower.contains("boss") || lower.contains("startup")
+        || lower.contains("副业") {
+        return knowledge.routing.get("boss")
+            .cloned().unwrap_or_else(|| "boss-explore".into());
+    }
+    // News / tech / topics
+    if lower.contains("日报") || lower.contains("新闻") || lower.contains("科技")
+        || lower.contains("选题") || lower.contains("news") || lower.contains("热点") {
+        return knowledge.routing.get("news")
+            .cloned().unwrap_or_else(|| "hot-news".into());
+    }
+    // Fallback
+    knowledge.routing.get("default")
+        .cloned().unwrap_or_else(|| "general".into())
+}
+
+/// Save content to the Obsidian vault as a dated markdown file,
+/// automatically routed to the correct subdirectory.
+pub fn save_to_vault(knowledge: &config::KnowledgeConfig, task_name: &str, content: &str) {
+    use std::fs;
+    let now = chrono::Local::now();
+    let date_str = now.format("%Y-%m-%d").to_string();
+    let time_str = now.format("%H%M").to_string();
+
+    let subdir = resolve_vault_subdir(knowledge, task_name);
+    let dir = std::path::Path::new(&knowledge.vault_path)
+        .join(&subdir)
+        .join(&date_str);
+    if let Err(e) = fs::create_dir_all(&dir) {
+        tracing::warn!("Failed to create vault dir {:?}: {}", dir, e);
+        return;
+    }
+
+    let safe_name: String = task_name.chars()
+        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' || c > '\x7f' { c } else { '_' })
+        .collect();
+    let file_path = dir.join(format!("{}-{}.md", time_str, safe_name));
+
+    let tags: Vec<&str> = if subdir.contains("invest") {
+        vec!["投资", "日报"]
+    } else if subdir.contains("boss") {
+        vec!["创业", "灵感"]
+    } else if subdir.contains("news") {
+        vec!["科技", "热点"]
+    } else {
+        vec!["auto-crab"]
+    };
+
+    let md = format!(
+        "---\ntask: {}\ndate: {}\ntime: {}\ncategory: {}\ntags: [{}]\n---\n\n# {}\n\n{}\n",
+        task_name, date_str, now.format("%H:%M"), subdir,
+        tags.join(", "), task_name, content
+    );
+
+    match fs::write(&file_path, &md) {
+        Ok(_) => tracing::info!("Saved report to vault: {:?} (category: {})", file_path, subdir),
+        Err(e) => tracing::warn!("Failed to write vault file {:?}: {}", file_path, e),
+    }
 }
 
 fn build_remote_reply(text: &str) -> String {
@@ -497,7 +615,30 @@ async fn run_remote_chat(
     user_input: &str,
     audit: Option<&std::sync::Arc<security::audit::AuditLogger>>,
 ) -> anyhow::Result<String> {
+    run_remote_chat_inner(cfg, history, user_input, audit, true).await
+}
+
+async fn run_remote_chat_no_plan(
+    cfg: &config::AppConfig,
+    history: &[crate::models::provider::ChatMessage],
+    user_input: &str,
+    audit: Option<&std::sync::Arc<security::audit::AuditLogger>>,
+) -> anyhow::Result<String> {
+    run_remote_chat_inner(cfg, history, user_input, audit, false).await
+}
+
+async fn run_remote_chat_inner(
+    cfg: &config::AppConfig,
+    history: &[crate::models::provider::ChatMessage],
+    user_input: &str,
+    audit: Option<&std::sync::Arc<security::audit::AuditLogger>>,
+    planning_enabled: bool,
+) -> anyhow::Result<String> {
     use crate::core::engine::*;
+
+    let chat_start = std::time::Instant::now();
+    let preview: String = user_input.chars().take(50).collect();
+    tracing::info!("[RemoteChat] Start (planning={}, history={}): {}", planning_enabled, history.len(), preview);
 
     let engine = AgentEngine::from_config(cfg)?;
     let full_prompt = build_full_system_prompt(cfg, Some(user_input));
@@ -512,10 +653,12 @@ async fn run_remote_chat(
         audit: audit.cloned(),
         audit_source: security::audit::AuditSource::Feishu,
         memory,
-        planning_enabled: true,
+        planning_enabled,
     };
 
     let result = engine.run(messages, &stream_id, &sink, &agent_cfg).await;
+    let elapsed = chat_start.elapsed();
+    tracing::info!("[RemoteChat] Completed in {:.1}s (result_len={})", elapsed.as_secs_f64(), result.len());
     Ok(result)
 }
 
@@ -559,9 +702,39 @@ async fn handle_remote_control_command(
         "chat" => {
             let text = cmd.text.trim();
 
-            if text.eq_ignore_ascii_case("/reset") {
-                conv_state.clear(&session_key).await;
-                return "已清空当前会话上下文。".to_string();
+            if text.eq_ignore_ascii_case("/reset") || text.eq_ignore_ascii_case("/clear")
+                || text.eq_ignore_ascii_case("/新对话") || text.eq_ignore_ascii_case("/清空") {
+                let active_key = conv_state.get_active_session(&cmd.user_id).await;
+                let clear_key = if active_key.is_empty() { &session_key } else { &active_key };
+                conv_state.clear(clear_key).await;
+                return "✅ 已清空当前会话上下文，可以开始全新对话了。\n\n💡 提示：发送 /help 查看所有可用命令".to_string();
+            }
+
+            if text.eq_ignore_ascii_case("/new") {
+                let new_name = chrono::Local::now().format("%m%d-%H%M").to_string();
+                let new_key = format!("{}:{}:{}", cmd.source, cmd.user_id, new_name);
+                conv_state.set_active_session(&cmd.user_id, &new_key).await;
+                return format!("✅ 已创建并切换到新会话「{}」\n旧会话内容保留，可通过 /sessions 查看和切换。", new_name);
+            }
+
+            if text.eq_ignore_ascii_case("/help") || text.eq_ignore_ascii_case("/帮助") {
+                return "🦀 Auto Crab 飞书命令：\n\n\
+                    💬 对话管理\n\
+                    /clear 或 /新对话 — 清空当前会话上下文\n\
+                    /new — 新建一个独立会话（保留旧会话）\n\
+                    /sessions — 查看所有会话\n\
+                    /session <名称> — 切换到指定会话\n\n\
+                    📊 系统\n\
+                    /status — 查看系统状态\n\
+                    /status models — 查看模型配置\n\n\
+                    🔍 监控\n\
+                    /monitor <秒数> <内容> — 启动定时监控\n\
+                    /monitors — 查看活跃监控\n\
+                    /monitor stop <ID> — 停止监控\n\n\
+                    🔧 其他\n\
+                    /task <描述> — 创建需审批的任务\n\
+                    /undo — 撤回最近文件修改\n\n\
+                    直接发送文字即可与 AI 对话。".to_string();
             }
 
             if text.eq_ignore_ascii_case("/undo") {
@@ -1032,6 +1205,7 @@ pub fn run() {
             commands::rename_skill_cmd,
             commands::get_skills_dir,
             commands::get_search_usage_stats,
+            commands::save_to_knowledge_base,
         ])
         .setup(|app| {
             let app_handle = app.handle().clone();
@@ -1129,11 +1303,21 @@ pub fn run() {
                                         tracing::info!("Scheduled task triggered: {} (auto={})", job.name, job.auto_execute);
                                         if job.auto_execute {
                                             let enriched_action = enrich_scheduled_action(&job.action).await;
-                                            let result = run_remote_chat(&sched_cfg, &[], &enriched_action, None).await;
+                                            // Scheduled tasks already have enriched data — skip planner to avoid
+                                            // multiplying LLM calls (planner would add 5-10x more calls).
+                                            let result = run_remote_chat_no_plan(&sched_cfg, &[], &enriched_action, None).await;
                                             let msg = match result {
-                                                Ok(text) => format!("📋 {}\n\n{}", job.name, text),
-                                                Err(e) => format!("📋 {} 执行失败\n{}", job.name, e),
+                                                Ok(ref text) => format!("📋 {}\n\n{}", job.name, text),
+                                                Err(ref e) => format!("📋 {} 执行失败\n{}", job.name, e),
                                             };
+
+                                            // Save to Obsidian vault if configured
+                                            if sched_cfg.knowledge.enabled && !sched_cfg.knowledge.vault_path.is_empty() {
+                                                if let Ok(ref text) = result {
+                                                    save_to_vault(&sched_cfg.knowledge, &job.name, text);
+                                                }
+                                            }
+
                                             if let Some(ref fc) = sched_feishu {
                                                 let mut bot = remote::feishu::FeishuBot::new(fc.clone());
                                                 let _ = bot.send_message(&sched_user, &msg).await;
