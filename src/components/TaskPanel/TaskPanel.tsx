@@ -85,7 +85,7 @@ export function TaskPanel() {
         <div className="w-12 h-12 rounded-full flex items-center justify-center" style={{ background: "var(--accent-light)" }}>
           <Activity size={20} style={{ color: "var(--accent)", opacity: 0.6 }} />
         </div>
-        <p className="text-xs text-center leading-5" style={{ color: "var(--text-muted)" }}>
+        <p className="text-[13px] text-center leading-5" style={{ color: "var(--text-muted)" }}>
           Agent 思考过程<br/>和工具调用将在这里显示
         </p>
       </div>
@@ -104,13 +104,13 @@ export function TaskPanel() {
           ) : (
             <Activity size={13} style={{ color: "var(--text-muted)" }} />
           )}
-          <span className="text-xs font-medium">
+          <span className="text-[13px] font-medium">
             {isActive ? "执行中..." : `共 ${steps.length} 步`}
           </span>
         </div>
         <button
           onClick={() => setSteps([])}
-          className="text-[11px] px-2 py-0.5 rounded transition-colors"
+          className="text-[12px] px-2 py-0.5 rounded transition-colors"
           style={{ color: "var(--text-muted)", background: "var(--bg-tertiary)" }}
         >
           清空
@@ -133,20 +133,20 @@ export function TaskPanel() {
               >
                 {isOpen ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
                 {getIcon(step)}
-                <span className="text-[12px] truncate flex-1 font-medium" style={{ color: "var(--text-primary)" }}>
+                <span className="text-[13px] truncate flex-1 font-medium" style={{ color: "var(--text-primary)" }}>
                   {step.type === "thinking" && (step.status === "running" ? "思考中..." : "思考完成")}
                   {step.type === "tool_call" && `${step.tool || "工具"}`}
                   {step.type === "tool_result" && `${step.tool || "工具"} ✓`}
                   {step.type === "plan" && "📋 任务计划"}
                   {step.type === "response" && "回复"}
                 </span>
-                <span className="text-[10px] shrink-0 tabular-nums" style={{ color: "var(--text-muted)" }}>
+                <span className="text-[11px] shrink-0 tabular-nums" style={{ color: "var(--text-muted)" }}>
                   {new Date(step.timestamp).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
                 </span>
               </button>
               {isOpen && step.content && (
                 <pre
-                  className="text-[11px] leading-relaxed px-3 py-2 ml-3 mt-1 rounded-lg overflow-x-auto whitespace-pre-wrap break-words"
+                  className="text-[12px] leading-relaxed px-3 py-2 ml-3 mt-1 rounded-lg overflow-x-auto whitespace-pre-wrap break-words"
                   style={{
                     background: "var(--bg-tertiary)",
                     color: "var(--text-secondary)",

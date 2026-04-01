@@ -168,30 +168,38 @@ export function ChatView() {
         style={{ background: "var(--bg-primary)" }}
       >
         {messages.length === 0 ? (
-          <div className="flex flex-col items-center justify-center h-full gap-4">
+          <div className="flex flex-col items-center justify-center h-full gap-5 animate-fade-in">
             <div
               className="w-20 h-20 rounded-2xl flex items-center justify-center text-4xl"
-              style={{ background: "linear-gradient(135deg, var(--accent), var(--accent-hover))", color: "#fff", boxShadow: "var(--shadow-md)" }}
+              style={{ background: "linear-gradient(135deg, var(--accent), var(--accent-hover))", color: "#fff", boxShadow: "0 8px 32px rgba(99, 102, 241, 0.25)" }}
             >
               🦀
             </div>
-            <h2 className="text-lg font-bold mt-1">你好，我是小蟹</h2>
-            <p style={{ color: "var(--text-muted)" }} className="text-sm text-center max-w-md leading-relaxed">
-              你的安全桌面 AI 助理。可以操作文件、执行命令、截图分析、远程控制。
-            </p>
-            <div className="flex gap-2.5 mt-4 flex-wrap justify-center">
-              {["帮我整理桌面文件", "看看屏幕上有什么", "写个 Python 脚本"].map((s) => (
+            <div className="text-center">
+              <h2 className="text-lg font-bold">你好，我是小蟹</h2>
+              <p style={{ color: "var(--text-muted)" }} className="text-sm mt-1.5 max-w-md leading-relaxed">
+                你的安全桌面 AI 助理。可以操作文件、执行命令、截图分析、远程控制。
+              </p>
+            </div>
+            <div className="grid grid-cols-2 gap-2.5 mt-2 max-w-sm w-full">
+              {[
+                { text: "帮我整理桌面文件", icon: "📁" },
+                { text: "看看屏幕上有什么", icon: "👀" },
+                { text: "写个 Python 脚本", icon: "🐍" },
+                { text: "今日投资行情分析", icon: "📈" },
+              ].map((s) => (
                 <button
-                  key={s}
-                  onClick={() => { setInput(s); textareaRef.current?.focus(); }}
-                  className="px-4 py-2 rounded-xl text-[13px] transition-all border"
+                  key={s.text}
+                  onClick={() => { setInput(s.text); textareaRef.current?.focus(); }}
+                  className="flex items-center gap-2.5 px-4 py-3 rounded-xl text-[13px] transition-all border text-left"
                   style={{
                     background: "var(--bg-secondary)",
                     borderColor: "var(--border)",
                     color: "var(--text-secondary)",
                   }}
                 >
-                  {s}
+                  <span className="text-base">{s.icon}</span>
+                  <span>{s.text}</span>
                 </button>
               ))}
             </div>

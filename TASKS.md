@@ -81,6 +81,14 @@
 - [x] T-046: 生成各平台安装包 (msi / dmg / deb+AppImage) — CI 自动构建
 - [x] T-047: 编写用户文档和 README
 
+## P13: MCP 协议支持 (Model Context Protocol) ✅ 2026-03-31
+
+- [x] T-095: MCP Client — 连接外部 MCP Server 扩展工具能力（rmcp crate, stdio 传输, 自动发现/路由）
+- [x] T-096: MCP Server — 暴露 Auto-Crab 工具给外部 AI（search_web, get_market_price, read_file, fetch_webpage, execute_shell）
+- [x] T-097: MCP 配置 schema（McpConfig + McpServerEntry, TOML 配置, Tauri 命令）
+- [x] T-098: MCP 引擎集成（AgentEngine 工具路由, 命名空间化, 安全级别）
+- [x] T-099: MCP Server CLI 模式（--mcp-server 标志, 可被 Cursor/Claude Desktop 连接）
+
 ## P7: 能力联通 (Tool Execution) ✅ 2026-03-21
 
 - [x] T-048: 将 Agent 工具调用循环真正接入 chat_stream_start（文件/Shell 真实执行，agent-step 事件推送）
@@ -172,6 +180,7 @@
 | 2026-03-21 | T-067~T-074 | 鼠标键盘操控 + 飞书多会话 + Settings下拉/密钥预览 |
 | 2026-03-21 | T-075~T-081 | Vision槽位 + 定时监控 + /status增强 |
 | 2026-03-28 | T-089~T-094 | 搜索多引擎 + 企业微信接入 + 任务规划器 + CI/CD |
+| 2026-03-31 | T-095~T-099 | MCP 协议支持（Client + Server + 配置 + 引擎集成 + CLI） |
 
 ## 里程碑
 
@@ -183,4 +192,5 @@
 - ✅ 2026-03-21: P10 路由 + 定时监控
 - ✅ 2026-03-21: P11 安全加固 + 工具补齐（审批拦截 + 快照 + 目录选择 + 网页抓取 + TaskPanel）
 - ✅ 2026-03-28: P12 Agent 智能升级（搜索多引擎 + 企业微信 + 任务规划器 + CI/CD）
-- 🔲 下一步: T-045 Tauri Updater 配置、MCP 协议支持
+- ✅ 2026-03-31: P13 MCP 协议支持
+- 🔲 下一步: T-045 Tauri Updater 配置

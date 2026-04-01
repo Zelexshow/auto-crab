@@ -1,6 +1,7 @@
 mod commands;
 mod config;
 mod core;
+mod mcp;
 mod models;
 mod plugins;
 mod remote;
@@ -137,10 +138,8 @@ fn create_memory(cfg: &config::AppConfig) -> Option<std::sync::Arc<core::long_me
         .and_then(|r| crate::security::credentials::CredentialStore::resolve_ref(r).ok());
 
     dashscope_key.map(|key| {
-        let data_dir = directories::ProjectDirs::from("com", "zelex", "auto-crab")
-            .map(|d| d.data_dir().to_path_buf())
-            .unwrap_or_else(|| std::path::PathBuf::from("."));
-        tracing::info!("[Memory] Long-term memory enabled (DashScope Embedding)");
+        let data_dir = commands::app_data_dir();
+        tracing::info!("[Memory] Long-term memory enabled (DashScope Embedding), dir: {}", data_dir.display());
         std::sync::Arc::new(core::long_memory::LongTermMemory::new(data_dir, key))
     })
 }
@@ -446,32 +445,58 @@ async fn enrich_scheduled_action(action: &str) -> String {
         let price_data: Vec<String> = futures::future::join_all(futures).await;
         sections.push(format!("【实时行情数据 ({})】\n{}", now, price_data.join("\n")));
 
-        // Parallel news fetch (3 queries simultaneously)
-        let news_queries = vec![
-            "stock market China A-share news today",
-            "US tech stocks NASDAQ latest",
-            "Bitcoin crypto market news",
+        // All search queries in parallel: market news + macro + sentiment
+        let all_queries: Vec<(&str, &str)> = vec![
+            // Market news (existing)
+            ("news", "stock market China A-share news today"),
+            ("news", "US tech stocks NASDAQ latest"),
+            ("news", "Bitcoin crypto market news"),
+            // Macro economy & policy (NEW)
+            ("macro", "Federal Reserve PBOC interest rate monetary policy today"),
+            ("macro", "China PMI CPI GDP economic data latest 2026"),
+            ("macro", "geopolitical trade tariff sanctions impact market"),
+            // Market sentiment (NEW)
+            ("sentiment", "VIX fear greed index market sentiment today"),
+            ("sentiment", "China A-share northbound capital flow margin trading"),
         ];
-        let news_futures: Vec<_> = news_queries.iter().map(|nq| {
-            let nq = nq.to_string();
+
+        let search_futures: Vec<_> = all_queries.iter().map(|(cat, query)| {
+            let cat = cat.to_string();
+            let query = query.to_string();
             async move {
-                match commands::search_web_pub(&nq).await {
+                match commands::search_web_pub(&query).await {
                     Ok(results) => {
-                        let brief: String = results.chars().take(500).collect();
-                        Some(format!("[{}]\n{}", nq, brief))
+                        let brief: String = results.chars().take(600).collect();
+                        Some((cat, format!("[{}]\n{}", query, brief)))
                     }
                     Err(e) => {
-                        tracing::warn!("Scheduled search failed for '{}': {}", nq, e);
+                        tracing::warn!("Scheduled search failed for '{}': {}", query, e);
                         None
                     }
                 }
             }
         }).collect();
 
-        let news_results = futures::future::join_all(news_futures).await;
-        let news_data: Vec<String> = news_results.into_iter().flatten().collect();
+        let search_results = futures::future::join_all(search_futures).await;
+        let mut news_data = Vec::new();
+        let mut macro_data = Vec::new();
+        let mut sentiment_data = Vec::new();
+        for item in search_results.into_iter().flatten() {
+            match item.0.as_str() {
+                "news" => news_data.push(item.1),
+                "macro" => macro_data.push(item.1),
+                "sentiment" => sentiment_data.push(item.1),
+                _ => {}
+            }
+        }
+        if !macro_data.is_empty() {
+            sections.push(format!("【宏观经济与政策动态】\n{}", macro_data.join("\n\n")));
+        }
         if !news_data.is_empty() {
             sections.push(format!("【市场新闻动态】\n{}", news_data.join("\n\n")));
+        }
+        if !sentiment_data.is_empty() {
+            sections.push(format!("【市场情绪信号】\n{}", sentiment_data.join("\n\n")));
         }
     }
 
@@ -507,6 +532,7 @@ async fn enrich_scheduled_action(action: &str) -> String {
 
     let enrich_elapsed = enrich_start.elapsed();
     tracing::info!("[Enrich] Data pre-fetch completed in {:.1}s ({} sections)", enrich_elapsed.as_secs_f64(), sections.len());
+    commands::record_perf_event("enrich", &format!("{} sections", sections.len()), enrich_elapsed.as_millis() as u64);
 
     if sections.is_empty() {
         return action.to_string();
@@ -615,7 +641,10 @@ async fn run_remote_chat(
     user_input: &str,
     audit: Option<&std::sync::Arc<security::audit::AuditLogger>>,
 ) -> anyhow::Result<String> {
-    run_remote_chat_inner(cfg, history, user_input, audit, true).await
+    // Disable planner for remote (Feishu) chats: planner splits tasks into
+    // sequential LLM calls which multiplies latency on webhook-based channels.
+    // The model handles analysis well in a single pass with skill prompts.
+    run_remote_chat_inner(cfg, history, user_input, audit, false).await
 }
 
 async fn run_remote_chat_no_plan(
@@ -648,7 +677,7 @@ async fn run_remote_chat_inner(
 
     let memory = create_memory(cfg);
     let agent_cfg = AgentConfig {
-        max_rounds: 6,
+        max_rounds: 4,
         tools_enabled: cfg.tools.shell_enabled,
         audit: audit.cloned(),
         audit_source: security::audit::AuditSource::Feishu,
@@ -659,6 +688,7 @@ async fn run_remote_chat_inner(
     let result = engine.run(messages, &stream_id, &sink, &agent_cfg).await;
     let elapsed = chat_start.elapsed();
     tracing::info!("[RemoteChat] Completed in {:.1}s (result_len={})", elapsed.as_secs_f64(), result.len());
+    commands::record_perf_event("remote_chat", &preview, elapsed.as_millis() as u64);
     Ok(result)
 }
 
@@ -738,10 +768,7 @@ async fn handle_remote_control_command(
             }
 
             if text.eq_ignore_ascii_case("/undo") {
-                let data_dir = directories::ProjectDirs::from("com", "zelex", "auto-crab")
-                    .map(|d| d.data_dir().to_path_buf())
-                    .unwrap_or_else(|| std::path::PathBuf::from("."));
-                let snapshots = crate::core::snapshots::SnapshotStore::new(data_dir);
+                let snapshots = crate::core::snapshots::SnapshotStore::new(commands::app_data_dir());
                 match snapshots.list(1).await {
                     Ok(list) if !list.is_empty() => {
                         let snap = &list[0];
@@ -1157,6 +1184,17 @@ async fn handle_remote_control_command(
     }
 }
 
+/// Run Auto-Crab as an MCP server on stdio.
+/// Used when launched with `--mcp-server` flag.
+pub async fn run_mcp_server() -> anyhow::Result<()> {
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_env_filter("auto_crab=info")
+        .with_target(false)
+        .init();
+    mcp::server::run_stdio_server().await
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     fmt()
@@ -1174,12 +1212,7 @@ pub fn run() {
         .manage(commands::ApprovalState::default())
         .manage(RemoteConversationState::default())
         .manage(MonitorState::default())
-        .manage({
-            let data_dir = directories::ProjectDirs::from("com", "zelex", "auto-crab")
-                .map(|d| d.data_dir().to_path_buf())
-                .unwrap_or_else(|| std::path::PathBuf::from("."));
-            std::sync::Arc::new(security::audit::AuditLogger::new(data_dir))
-        })
+        .manage(std::sync::Arc::new(security::audit::AuditLogger::new(commands::app_data_dir())))
         .invoke_handler(tauri::generate_handler![
             commands::get_config,
             commands::save_config,
@@ -1206,9 +1239,16 @@ pub fn run() {
             commands::get_skills_dir,
             commands::get_search_usage_stats,
             commands::save_to_knowledge_base,
+            commands::get_mcp_status,
+            commands::get_perf_metrics,
         ])
         .setup(|app| {
             let app_handle = app.handle().clone();
+
+            // Initialize unified app data dir from Tauri (synchronous, before async tasks)
+            if let Ok(data_dir) = app.path().app_data_dir() {
+                commands::init_app_data_dir(data_dir);
+            }
 
             // Initialize config + webhook server
             let handle_clone = app_handle.clone();
@@ -1222,6 +1262,24 @@ pub fn run() {
                     Ok(cfg) => {
                         // Initialize search API config globally
                         commands::update_search_config(&cfg.search);
+
+                        // Load persisted perf events from disk
+                        commands::load_perf_events();
+
+                        // Initialize MCP client if enabled
+                        if cfg.mcp.client_enabled && !cfg.mcp.servers.is_empty() {
+                            let mcp_mgr = std::sync::Arc::new(mcp::client::McpClientManager::new());
+                            let errors = mcp_mgr.connect_all(&cfg.mcp.servers).await;
+                            if !errors.is_empty() {
+                                for e in &errors {
+                                    tracing::warn!("[MCP] {}", e);
+                                }
+                            }
+                            let status = mcp_mgr.status().await;
+                            let total_tools: usize = status.iter().map(|(_, c)| c).sum();
+                            tracing::info!("[MCP] Client initialized: {} servers, {} tools total", status.len(), total_tools);
+                            handle_clone.manage(mcp_mgr);
+                        }
 
                         if cfg.remote.enabled {
                             let (tx, mut rx) = tokio::sync::mpsc::channel(32);
@@ -1302,10 +1360,11 @@ pub fn run() {
                                     for job in due {
                                         tracing::info!("Scheduled task triggered: {} (auto={})", job.name, job.auto_execute);
                                         if job.auto_execute {
+                                            let sched_start = std::time::Instant::now();
                                             let enriched_action = enrich_scheduled_action(&job.action).await;
-                                            // Scheduled tasks already have enriched data — skip planner to avoid
-                                            // multiplying LLM calls (planner would add 5-10x more calls).
                                             let result = run_remote_chat_no_plan(&sched_cfg, &[], &enriched_action, None).await;
+                                            let sched_elapsed = sched_start.elapsed();
+                                            commands::record_perf_event("scheduled_task", &job.name, sched_elapsed.as_millis() as u64);
                                             let msg = match result {
                                                 Ok(ref text) => format!("📋 {}\n\n{}", job.name, text),
                                                 Err(ref e) => format!("📋 {} 执行失败\n{}", job.name, e),

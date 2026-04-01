@@ -26,6 +26,93 @@ static SEARCH_CONFIG: std::sync::LazyLock<Mutex<config::SearchConfig>> =
 static SEARCH_USAGE: std::sync::LazyLock<Mutex<HashMap<String, HashMap<String, u32>>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
+#[derive(Clone, Serialize, Deserialize)]
+pub struct PerfEvent {
+    pub event_type: String,
+    pub label: String,
+    pub duration_ms: u64,
+    pub timestamp: String,
+}
+
+static PERF_EVENTS: std::sync::LazyLock<Mutex<Vec<PerfEvent>>> =
+    std::sync::LazyLock::new(|| Mutex::new(Vec::new()));
+
+static APP_DATA_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// Call once at startup with Tauri's app_data_dir to unify all data paths.
+pub fn init_app_data_dir(dir: PathBuf) {
+    tracing::info!("[App] Data directory: {}", dir.display());
+    let _ = APP_DATA_DIR.set(dir);
+}
+
+/// Get the unified app data directory. Falls back to %APPDATA%/com.zelex.auto-crab on Windows.
+pub fn app_data_dir() -> PathBuf {
+    APP_DATA_DIR
+        .get()
+        .cloned()
+        .unwrap_or_else(|| {
+            if let Some(appdata) = std::env::var_os("APPDATA") {
+                PathBuf::from(appdata).join("com.zelex.auto-crab")
+            } else {
+                PathBuf::from(".")
+            }
+        })
+}
+
+fn perf_log_path() -> PathBuf {
+    app_data_dir().join("perf-events.jsonl")
+}
+
+/// Load persisted perf events from disk (call once at startup).
+pub fn load_perf_events() {
+    let path = perf_log_path();
+    tracing::info!("[Perf] Data file path: {}", path.display());
+    if !path.exists() {
+        tracing::info!("[Perf] No historical data file found, starting fresh");
+        return;
+    }
+    let Ok(content) = std::fs::read_to_string(&path) else { return };
+    let mut events: Vec<PerfEvent> = content.lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    if events.len() > 500 {
+        events.drain(..events.len() - 500);
+    }
+    if let Ok(mut guard) = PERF_EVENTS.lock() {
+        *guard = events;
+    }
+    tracing::info!("[Perf] Loaded {} historical events from disk", content.lines().count());
+}
+
+pub fn record_perf_event(event_type: &str, label: &str, duration_ms: u64) {
+    let event = PerfEvent {
+        event_type: event_type.to_string(),
+        label: label.to_string(),
+        duration_ms,
+        timestamp: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+    };
+    if let Ok(mut guard) = PERF_EVENTS.lock() {
+        guard.push(event.clone());
+        if guard.len() > 500 {
+            let drain_count = guard.len() - 500;
+            guard.drain(..drain_count);
+        }
+    }
+    // Append to disk (fire-and-forget, non-blocking)
+    std::thread::spawn(move || {
+        if let Ok(line) = serde_json::to_string(&event) {
+            use std::io::Write;
+            let path = perf_log_path();
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+                let _ = writeln!(f, "{}", line);
+            }
+        }
+    });
+}
+
 pub fn update_search_config(cfg: &config::SearchConfig) {
     if let Ok(mut guard) = SEARCH_CONFIG.lock() {
         *guard = cfg.clone();
@@ -326,6 +413,7 @@ pub fn tool_operation_type(name: &str) -> &str {
         "execute_shell" | "analyze_and_act" | "quick_reply_wechat" => "execute_shell",
         "mouse_click" | "keyboard_type" | "key_press" => "execute_shell",
         "delete_file" => "delete_file",
+        name if name.starts_with("mcp_") => "search_web",
         _ => "unknown",
     }
 }
@@ -374,7 +462,10 @@ pub async fn dispatch_tool_with_audit(
         return format!("操作被禁止: {}", tc.name);
     }
 
+    let tool_start = std::time::Instant::now();
     let result = dispatch_tool(tc, file_ops, shell).await;
+    let tool_elapsed = tool_start.elapsed();
+    record_perf_event("tool_call", &tc.name, tool_elapsed.as_millis() as u64);
 
     if let Some(a) = audit {
         let details: String = format!(
@@ -410,10 +501,7 @@ pub async fn dispatch_tool(tc: &ToolCall, file_ops: &FileOps, shell: &ShellExecu
             let path = args["path"].as_str().unwrap_or("");
             let content = args["content"].as_str().unwrap_or("");
 
-            let data_dir = directories::ProjectDirs::from("com", "zelex", "auto-crab")
-                .map(|d| d.data_dir().to_path_buf())
-                .unwrap_or_else(|| PathBuf::from("."));
-            let snapshots = crate::core::snapshots::SnapshotStore::new(data_dir);
+            let snapshots = crate::core::snapshots::SnapshotStore::new(app_data_dir());
             let expanded = FileOps::expand_path(path);
             if expanded.exists() {
                 if let Err(e) = snapshots
@@ -872,6 +960,7 @@ async fn do_key_press(key_str: &str) -> anyhow::Result<String> {
 }
 
 pub async fn search_web_pub(query: &str) -> anyhow::Result<String> { search_web(query).await }
+pub async fn fetch_webpage_pub(url: &str) -> anyhow::Result<String> { fetch_webpage_text(url).await }
 
 async fn search_web(query: &str) -> anyhow::Result<String> {
     let cfg = SEARCH_CONFIG.lock().map(|g| g.clone()).unwrap_or_default();
@@ -2235,12 +2324,24 @@ async fn fetch_sina_index(symbol: &str, display: &str) -> anyhow::Result<String>
     ))
 }
 
-/// Fetch index data from Yahoo Finance v8 chart API (free, no key required).
+/// Fetch index data from Yahoo Finance (tries v8 chart then v6 quote).
 async fn fetch_yahoo_index(yahoo_symbol: &str, display: &str) -> anyhow::Result<String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(12))
         .build()?;
 
+    // Try v8 chart API first
+    if let Ok(result) = fetch_yahoo_v8(&client, yahoo_symbol, display).await {
+        return Ok(result);
+    }
+    let label = display;
+    tracing::warn!("[Yahoo] v8 chart failed for {}, trying v6 quote", label);
+
+    // Fallback: v6 quote API (different endpoint, often more stable)
+    fetch_yahoo_v6(&client, yahoo_symbol, display).await
+}
+
+async fn fetch_yahoo_v8(client: &reqwest::Client, yahoo_symbol: &str, display: &str) -> anyhow::Result<String> {
     let url = format!(
         "https://query1.finance.yahoo.com/v8/finance/chart/{}?interval=1d&range=1d",
         urlencoding::encode(yahoo_symbol)
@@ -2248,32 +2349,81 @@ async fn fetch_yahoo_index(yahoo_symbol: &str, display: &str) -> anyhow::Result<
 
     let resp = client
         .get(&url)
-        .header("User-Agent", "Mozilla/5.0")
+        .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
         .send()
         .await?;
 
-    let data: serde_json::Value = resp.json().await?;
-    let result = &data["chart"]["result"];
-    if !result.is_array() || result.as_array().map(|a| a.is_empty()).unwrap_or(true) {
-        anyhow::bail!("Yahoo Finance 无数据: {}", display);
+    let status = resp.status();
+    let body = resp.text().await?;
+    if !status.is_success() || body.contains("<html") || body.contains("<!DOCTYPE") {
+        anyhow::bail!("Yahoo v8 returned non-JSON for {}: HTTP {}", display, status);
     }
 
-    let item = &result[0];
-    let meta = &item["meta"];
+    let data: serde_json::Value = serde_json::from_str(&body)
+        .map_err(|e| anyhow::anyhow!("Yahoo v8 JSON parse error for {}: {}", display, e))?;
+
+    let result = &data["chart"]["result"];
+    if !result.is_array() || result.as_array().map(|a| a.is_empty()).unwrap_or(true) {
+        anyhow::bail!("Yahoo v8 无数据: {}", display);
+    }
+
+    let meta = &result[0]["meta"];
     let current = meta["regularMarketPrice"].as_f64().unwrap_or(0.0);
     let prev_close = meta["chartPreviousClose"].as_f64()
         .or_else(|| meta["previousClose"].as_f64())
         .unwrap_or(0.0);
 
     if current == 0.0 {
-        anyhow::bail!("Yahoo Finance 返回无效价格: {}", display);
+        anyhow::bail!("Yahoo v8 无效价格: {}", display);
     }
 
+    format_yahoo_result(current, prev_close, meta["marketState"].as_str().unwrap_or("UNKNOWN"), display)
+}
+
+async fn fetch_yahoo_v6(client: &reqwest::Client, yahoo_symbol: &str, display: &str) -> anyhow::Result<String> {
+    let url = format!(
+        "https://query1.finance.yahoo.com/v6/finance/quote?symbols={}",
+        urlencoding::encode(yahoo_symbol)
+    );
+
+    let resp = client
+        .get(&url)
+        .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+        .send()
+        .await?;
+
+    let status = resp.status();
+    let body = resp.text().await?;
+    if !status.is_success() || body.contains("<html") {
+        anyhow::bail!("Yahoo v6 returned non-JSON for {}: HTTP {}", display, status);
+    }
+
+    let data: serde_json::Value = serde_json::from_str(&body)
+        .map_err(|e| anyhow::anyhow!("Yahoo v6 JSON parse error for {}: {}", display, e))?;
+
+    let quotes = &data["quoteResponse"]["result"];
+    if !quotes.is_array() || quotes.as_array().map(|a| a.is_empty()).unwrap_or(true) {
+        anyhow::bail!("Yahoo v6 无数据: {}", display);
+    }
+
+    let q = &quotes[0];
+    let current = q["regularMarketPrice"].as_f64().unwrap_or(0.0);
+    let prev_close = q["regularMarketPreviousClose"].as_f64()
+        .or_else(|| q["previousClose"].as_f64())
+        .unwrap_or(0.0);
+
+    if current == 0.0 {
+        anyhow::bail!("Yahoo v6 无效价格: {}", display);
+    }
+
+    format_yahoo_result(current, prev_close, q["marketState"].as_str().unwrap_or("UNKNOWN"), display)
+}
+
+fn format_yahoo_result(current: f64, prev_close: f64, market_state: &str, display: &str) -> anyhow::Result<String> {
     let change = current - prev_close;
     let change_pct = if prev_close > 0.0 { change / prev_close * 100.0 } else { 0.0 };
     let emoji = if change > 0.0 { "📈" } else if change < 0.0 { "📉" } else { "➡️" };
 
-    let market_state = meta["marketState"].as_str().unwrap_or("UNKNOWN");
     let state_text = match market_state {
         "REGULAR" => "交易中",
         "PRE" => "盘前",
@@ -2284,10 +2434,10 @@ async fn fetch_yahoo_index(yahoo_symbol: &str, display: &str) -> anyhow::Result<
 
     Ok(format!(
         "{emoji} {display} 实时行情\n\
-        当前点位: {current:.2}\n\
-        涨跌: {change:+.2} ({change_pct:+.2}%) {emoji}\n\
-        市场状态: {state_text}\n\
-        数据来源: Yahoo Finance",
+当前点位: {current:.2}\n\
+涨跌: {change:+.2} ({change_pct:+.2}%) {emoji}\n\
+市场状态: {state_text}\n\
+数据来源: Yahoo Finance",
     ))
 }
 
@@ -2628,4 +2778,44 @@ pub async fn delete_conversation(app: AppHandle, id: String) -> ApiResult<()> {
         Ok(()) => ApiResult::ok(()),
         Err(e) => ApiResult::err(format!("Failed to delete conversation: {}", e)),
     }
+}
+
+#[tauri::command]
+pub async fn get_mcp_status(
+    app: AppHandle,
+) -> ApiResult<Vec<(String, usize)>> {
+    match app.try_state::<std::sync::Arc<crate::mcp::client::McpClientManager>>() {
+        Some(mgr) => ApiResult::ok(mgr.status().await),
+        None => ApiResult::ok(vec![]),
+    }
+}
+
+#[tauri::command]
+pub async fn get_perf_metrics() -> ApiResult<serde_json::Value> {
+    let events = PERF_EVENTS.lock().ok().map(|g| g.clone()).unwrap_or_default();
+    let total = events.len();
+    let chat_events: Vec<&PerfEvent> = events.iter().filter(|e| e.event_type == "remote_chat").collect();
+    let enrich_events: Vec<&PerfEvent> = events.iter().filter(|e| e.event_type == "enrich").collect();
+    let tool_events: Vec<&PerfEvent> = events.iter().filter(|e| e.event_type == "tool_call").collect();
+    let sched_events: Vec<&PerfEvent> = events.iter().filter(|e| e.event_type == "scheduled_task").collect();
+
+    let avg_chat_ms = if chat_events.is_empty() { 0 } else {
+        chat_events.iter().map(|e| e.duration_ms).sum::<u64>() / chat_events.len() as u64
+    };
+    let avg_enrich_ms = if enrich_events.is_empty() { 0 } else {
+        enrich_events.iter().map(|e| e.duration_ms).sum::<u64>() / enrich_events.len() as u64
+    };
+
+    ApiResult::ok(serde_json::json!({
+        "total_events": total,
+        "summary": {
+            "chat_count": chat_events.len(),
+            "chat_avg_ms": avg_chat_ms,
+            "enrich_count": enrich_events.len(),
+            "enrich_avg_ms": avg_enrich_ms,
+            "tool_call_count": tool_events.len(),
+            "scheduled_task_count": sched_events.len(),
+        },
+        "recent_events": events.iter().rev().take(50).collect::<Vec<_>>(),
+    }))
 }

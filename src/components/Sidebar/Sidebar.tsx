@@ -1,14 +1,17 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef, useCallback } from "react";
 import {
   MessageSquare, Settings, Shield, PanelLeftClose, PanelLeftOpen,
-  Plus, Trash2, Pencil, Check, X,
+  Plus, Trash2, Pencil, Check, X, BarChart3, GripVertical,
 } from "lucide-react";
-import { useAppStore } from "../../stores/appStore";
+import { useAppStore, SIDEBAR_MIN, SIDEBAR_MAX, SIDEBAR_COLLAPSED } from "../../stores/appStore";
 import { useChatStore } from "../../stores/chatStore";
-import { clsx } from "clsx";
 
 export function Sidebar() {
-  const { currentView, setView, sidebarOpen, toggleSidebar } = useAppStore();
+  const {
+    currentView, setView,
+    sidebarWidth, setSidebarWidth,
+    sidebarCollapsed, toggleSidebar,
+  } = useAppStore();
   const {
     conversations, conversationId, newConversation,
     loadConversation, deleteConversation, refreshConversationList,
@@ -17,6 +20,10 @@ export function Sidebar() {
 
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editTitle, setEditTitle] = useState("");
+  const [isResizing, setIsResizing] = useState(false);
+  const sidebarRef = useRef<HTMLElement>(null);
+  const startXRef = useRef(0);
+  const startWidthRef = useRef(0);
 
   useEffect(() => {
     refreshConversationList();
@@ -38,59 +45,114 @@ export function Sidebar() {
     setEditingId(null);
   };
 
+  const onResizeStart = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    setIsResizing(true);
+    startXRef.current = e.clientX;
+    startWidthRef.current = sidebarWidth;
+  }, [sidebarWidth]);
+
+  useEffect(() => {
+    if (!isResizing) return;
+
+    const onMouseMove = (e: MouseEvent) => {
+      const delta = e.clientX - startXRef.current;
+      setSidebarWidth(startWidthRef.current + delta);
+    };
+
+    const onMouseUp = () => {
+      setIsResizing(false);
+    };
+
+    document.addEventListener("mousemove", onMouseMove);
+    document.addEventListener("mouseup", onMouseUp);
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+
+    return () => {
+      document.removeEventListener("mousemove", onMouseMove);
+      document.removeEventListener("mouseup", onMouseUp);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    };
+  }, [isResizing, setSidebarWidth]);
+
+  const handleResizeDoubleClick = useCallback(() => {
+    toggleSidebar();
+  }, [toggleSidebar]);
+
+  const expanded = !sidebarCollapsed;
+  const actualWidth = sidebarCollapsed ? SIDEBAR_COLLAPSED : sidebarWidth;
+
   const navItems = [
     { id: "chat" as const, label: "对话", icon: MessageSquare },
+    { id: "dashboard" as const, label: "监控", icon: BarChart3 },
     { id: "settings" as const, label: "设置", icon: Settings },
     { id: "audit" as const, label: "审计", icon: Shield },
   ];
 
   return (
     <aside
-      className={clsx(
-        "flex flex-col border-r transition-all duration-200 shrink-0",
-        sidebarOpen ? "w-56" : "w-14",
-      )}
+      ref={sidebarRef}
+      className="relative flex flex-col shrink-0 select-none"
       style={{
+        width: actualWidth,
+        minWidth: sidebarCollapsed ? SIDEBAR_COLLAPSED : SIDEBAR_MIN,
+        maxWidth: sidebarCollapsed ? SIDEBAR_COLLAPSED : SIDEBAR_MAX,
         background: "var(--bg-secondary)",
-        borderColor: "var(--border)",
+        transition: isResizing ? "none" : "width 0.2s ease",
+        zIndex: 10,
       }}
     >
       {/* Logo */}
       <div
-        className="flex items-center gap-3 px-4 h-14 border-b shrink-0"
-        style={{ borderColor: "var(--border)" }}
+        className="flex items-center gap-3 shrink-0"
+        style={{ padding: expanded ? "18px 18px 14px" : "18px 0 14px", justifyContent: expanded ? "flex-start" : "center" }}
       >
         <div
-          className="w-9 h-9 rounded-xl flex items-center justify-center text-lg shrink-0"
-          style={{ background: "linear-gradient(135deg, var(--accent), var(--accent-hover))", boxShadow: "var(--shadow-sm)" }}
+          className="w-10 h-10 rounded-xl flex items-center justify-center text-lg shrink-0"
+          style={{
+            background: "linear-gradient(135deg, var(--accent), var(--accent-hover))",
+            boxShadow: "0 4px 12px rgba(99, 102, 241, 0.3)",
+          }}
         >
           🦀
         </div>
-        {sidebarOpen && (
-          <div className="flex flex-col">
-            <span className="font-bold text-[15px] tracking-tight">Auto Crab</span>
+        {expanded && (
+          <div className="flex flex-col min-w-0">
+            <span className="font-bold text-[15px] tracking-tight truncate">Auto Crab</span>
             <span className="text-[11px]" style={{ color: "var(--text-muted)" }}>AI 桌面助理</span>
           </div>
         )}
       </div>
 
       {/* New chat */}
-      <div className="px-3 pt-4 pb-2">
+      <div style={{ padding: expanded ? "0 14px 8px" : "0 8px 8px" }}>
         <button
           onClick={() => {
             newConversation();
             setView("chat");
           }}
-          className="flex items-center justify-center gap-2 w-full rounded-xl px-4 py-2.5 text-[13px] font-medium"
-          style={{ background: "var(--accent)", color: "#fff", boxShadow: "var(--shadow-md)" }}
+          className="flex items-center justify-center gap-2 w-full rounded-xl text-[13px] font-medium"
+          style={{
+            background: "var(--accent)",
+            color: "#fff",
+            boxShadow: "0 2px 8px rgba(99, 102, 241, 0.25)",
+            padding: expanded ? "10px 16px" : "10px 0",
+          }}
         >
           <Plus size={16} strokeWidth={2.5} />
-          {sidebarOpen && "新对话"}
+          {expanded && "新对话"}
         </button>
       </div>
 
+      {/* Separator */}
+      <div style={{ padding: "0 14px", margin: "4px 0 6px" }}>
+        <div style={{ height: 1, background: "var(--border)", opacity: 0.6 }} />
+      </div>
+
       {/* Nav */}
-      <nav className="px-3 py-2 space-y-1">
+      <nav style={{ padding: expanded ? "0 10px" : "0 6px" }} className="space-y-0.5">
         {navItems.map((item) => {
           const Icon = item.icon;
           const active = currentView === item.id;
@@ -98,26 +160,33 @@ export function Sidebar() {
             <button
               key={item.id}
               onClick={() => setView(item.id)}
-              className="flex items-center gap-3 w-full rounded-xl px-3.5 py-2.5 text-[13px] font-medium transition-all"
+              className="flex items-center w-full rounded-lg text-[13px] font-medium transition-all"
               style={{
                 background: active ? "var(--accent-light)" : "transparent",
                 color: active ? "var(--accent)" : "var(--text-secondary)",
+                padding: expanded ? "9px 12px" : "9px 0",
+                gap: expanded ? 10 : 0,
+                justifyContent: expanded ? "flex-start" : "center",
               }}
+              title={expanded ? undefined : item.label}
             >
               <Icon size={18} strokeWidth={active ? 2.2 : 1.6} />
-              {sidebarOpen && item.label}
+              {expanded && item.label}
             </button>
           );
         })}
       </nav>
 
       {/* Conversation history */}
-      {sidebarOpen && conversations.length > 0 && (
-        <div className="flex-1 overflow-y-auto px-3 pt-3 border-t mt-2" style={{ borderColor: "var(--border)" }}>
-          <p className="text-[11px] font-semibold px-1 pb-2 uppercase tracking-widest" style={{ color: "var(--text-muted)" }}>
+      {expanded && conversations.length > 0 && (
+        <div className="flex-1 overflow-y-auto mt-4" style={{ padding: "0 10px" }}>
+          <div style={{ padding: "0 4px", margin: "0 0 8px" }}>
+            <div style={{ height: 1, background: "var(--border)", opacity: 0.6 }} />
+          </div>
+          <p className="text-[10px] font-semibold px-2 pb-2 uppercase tracking-widest" style={{ color: "var(--text-muted)" }}>
             历史对话
           </p>
-          <div className="space-y-1">
+          <div className="space-y-0.5">
             {conversations.slice(0, 30).map((conv) => {
               const active = conv.id === conversationId;
               const isEditing = editingId === conv.id;
@@ -125,13 +194,13 @@ export function Sidebar() {
               return (
                 <div
                   key={conv.id}
-                  className="group flex items-center rounded-xl transition-all"
+                  className="group flex items-center rounded-lg transition-all"
                   style={{
                     background: active ? "var(--bg-tertiary)" : "transparent",
                   }}
                 >
                   {isEditing ? (
-                    <div className="flex items-center gap-1.5 flex-1 px-3 py-2">
+                    <div className="flex items-center gap-1.5 flex-1 px-2.5 py-2">
                       <input
                         type="text"
                         value={editTitle}
@@ -140,7 +209,7 @@ export function Sidebar() {
                           if (e.key === "Enter") confirmRename();
                           if (e.key === "Escape") cancelRename();
                         }}
-                        className="flex-1 text-[13px] rounded-lg px-2.5 py-1 outline-none min-w-0"
+                        className="flex-1 text-[12px] rounded-md px-2 py-1 outline-none min-w-0"
                         style={{
                           background: "var(--bg-primary)",
                           border: "1px solid var(--accent)",
@@ -149,10 +218,10 @@ export function Sidebar() {
                         autoFocus
                       />
                       <button onClick={confirmRename} className="p-1" style={{ color: "var(--success)" }}>
-                        <Check size={14} />
+                        <Check size={13} />
                       </button>
                       <button onClick={cancelRename} className="p-1" style={{ color: "var(--text-muted)" }}>
-                        <X size={14} />
+                        <X size={13} />
                       </button>
                     </div>
                   ) : (
@@ -162,40 +231,41 @@ export function Sidebar() {
                           loadConversation(conv.id);
                           setView("chat");
                         }}
-                        className="flex-1 text-left px-3.5 py-2.5 min-w-0"
+                        className="flex-1 text-left min-w-0"
+                        style={{ padding: "8px 10px" }}
                       >
                         <p
-                          className="text-[13px] truncate leading-snug"
+                          className="text-[12px] truncate leading-snug"
                           style={{ color: active ? "var(--text-primary)" : "var(--text-secondary)" }}
                         >
                           {conv.title}
                         </p>
-                        <p className="text-[11px] mt-0.5" style={{ color: "var(--text-muted)" }}>
+                        <p className="text-[10px] mt-0.5" style={{ color: "var(--text-muted)" }}>
                           {conv.message_count} 条消息
                         </p>
                       </button>
-                      <div className="shrink-0 flex items-center gap-1 mr-2 opacity-0 group-hover:opacity-70 transition-opacity">
+                      <div className="shrink-0 flex items-center gap-0.5 mr-1.5 opacity-0 group-hover:opacity-70 transition-opacity">
                         <button
                           onClick={(e) => {
                             e.stopPropagation();
                             startRename(conv.id, conv.title);
                           }}
-                          className="p-1.5 rounded-lg hover:opacity-100"
+                          className="p-1 rounded-md"
                           style={{ color: "var(--text-muted)" }}
                           title="重命名"
                         >
-                          <Pencil size={13} />
+                          <Pencil size={12} />
                         </button>
                         <button
                           onClick={(e) => {
                             e.stopPropagation();
                             deleteConversation(conv.id);
                           }}
-                          className="p-1.5 rounded-lg hover:opacity-100"
+                          className="p-1 rounded-md"
                           style={{ color: "var(--text-muted)" }}
                           title="删除"
                         >
-                          <Trash2 size={13} />
+                          <Trash2 size={12} />
                         </button>
                       </div>
                     </>
@@ -208,16 +278,36 @@ export function Sidebar() {
       )}
 
       {/* Collapse toggle */}
-      <div className="px-2 pb-3 mt-auto">
+      <div className="mt-auto" style={{ padding: expanded ? "8px 14px 12px" : "8px 6px 12px" }}>
         <button
           onClick={toggleSidebar}
-          className="flex items-center gap-2 w-full rounded-md px-3 py-1.5 text-xs transition-colors"
-          style={{ color: "var(--text-muted)" }}
+          className="flex items-center w-full rounded-lg text-xs transition-colors"
+          style={{
+            color: "var(--text-muted)",
+            padding: expanded ? "7px 10px" : "7px 0",
+            gap: expanded ? 8 : 0,
+            justifyContent: expanded ? "flex-start" : "center",
+          }}
+          title={expanded ? "收起侧边栏" : "展开侧边栏"}
         >
-          {sidebarOpen ? <PanelLeftClose size={15} /> : <PanelLeftOpen size={15} />}
-          {sidebarOpen && "收起"}
+          {expanded ? <PanelLeftClose size={15} /> : <PanelLeftOpen size={15} />}
+          {expanded && "收起"}
         </button>
       </div>
+
+      {/* Resize handle */}
+      {!sidebarCollapsed && (
+        <div
+          className="sidebar-resize-handle"
+          onMouseDown={onResizeStart}
+          onDoubleClick={handleResizeDoubleClick}
+          title="拖动调整宽度，双击折叠"
+        >
+          <div className="sidebar-resize-indicator">
+            <GripVertical size={10} />
+          </div>
+        </div>
+      )}
     </aside>
   );
 }

@@ -306,11 +306,20 @@ impl ModelProvider for OpenAICompatProvider {
                 "[{}] API error {}: {}",
                 self.config.provider_name,
                 status,
-                body
+                &body[..body.len().min(500)]
             );
         }
 
-        let api_resp: ApiResponse = resp.json().await?;
+        let raw_text = resp.text().await.map_err(|e| {
+            anyhow::anyhow!("[{}] Failed to read response body: {}", self.config.provider_name, e)
+        })?;
+
+        let api_resp: ApiResponse = serde_json::from_str(&raw_text).map_err(|e| {
+            let preview: String = raw_text.chars().take(300).collect();
+            tracing::error!("[{}] JSON parse error: {}. Body preview: {}", self.config.provider_name, e, preview);
+            anyhow::anyhow!("[{}] Invalid JSON from API: {} (body starts with: {})", self.config.provider_name, e, &preview[..preview.len().min(100)])
+        })?;
+
         let choice = api_resp
             .choices
             .into_iter()

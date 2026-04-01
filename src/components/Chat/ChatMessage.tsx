@@ -221,6 +221,9 @@ export function ChatMessage({ message }: ChatMessageProps) {
             isUser ? "flex-row-reverse" : "flex-row",
           )}
         >
+          <span className="text-[10px] tabular-nums" style={{ color: "var(--text-muted)" }}>
+            {new Date(message.timestamp).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}
+          </span>
           {message.model && (
             <span className="text-[10px]" style={{ color: "var(--text-muted)" }}>
               {message.model}

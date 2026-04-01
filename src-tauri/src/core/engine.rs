@@ -71,6 +71,7 @@ pub struct AgentEngine {
     shell: ShellExecutor,
     tool_defs: Vec<ToolDefinition>,
     cfg: AppConfig,
+    mcp_client: Option<Arc<crate::mcp::client::McpClientManager>>,
 }
 
 impl AgentEngine {
@@ -96,7 +97,26 @@ impl AgentEngine {
             ),
             tool_defs: ToolRegistry::new().to_tool_definitions(),
             cfg: cfg.clone(),
+            mcp_client: None,
         })
+    }
+
+    /// Attach a shared MCP client manager to this engine. The engine will
+    /// merge MCP tools into its tool definitions and route calls accordingly.
+    pub fn with_mcp_client(mut self, client: Arc<crate::mcp::client::McpClientManager>) -> Self {
+        self.mcp_client = Some(client);
+        self
+    }
+
+    /// Refresh tool definitions, merging builtin tools with MCP-discovered tools.
+    pub async fn refresh_tool_defs(&mut self) {
+        let mut defs = ToolRegistry::new().to_tool_definitions();
+        if let Some(ref mcp) = self.mcp_client {
+            let mcp_defs = mcp.get_tool_definitions().await;
+            tracing::info!("[Engine] Merging {} MCP tools into {} builtins", mcp_defs.len(), defs.len());
+            defs.extend(mcp_defs);
+        }
+        self.tool_defs = defs;
     }
 
     pub async fn run(
@@ -163,6 +183,19 @@ impl AgentEngine {
         result
     }
 
+    /// Rough char-count estimate; trim tool_result messages if total exceeds threshold.
+    fn trim_context_if_needed(messages: &mut Vec<ChatMessage>, max_chars: usize) {
+        let total: usize = messages.iter().map(|m| m.content.len()).sum();
+        if total <= max_chars { return; }
+        tracing::warn!("[Engine] Context too large ({} chars, max {}), trimming tool results", total, max_chars);
+        for msg in messages.iter_mut() {
+            if msg.role == MessageRole::Tool && msg.content.len() > 2000 {
+                let truncated: String = msg.content.chars().take(1500).collect();
+                msg.content = format!("{}...\n[结果已截断，原始长度: {} 字符]", truncated, msg.content.len());
+            }
+        }
+    }
+
     /// Direct Agent loop with full streaming support (main path for simple tasks).
     async fn run_direct(
         &self,
@@ -176,7 +209,19 @@ impl AgentEngine {
         for round in 0..=agent_cfg.max_rounds {
             let use_tools = round < agent_cfg.max_rounds && agent_cfg.tools_enabled && self.cfg.tools.shell_enabled;
 
+            // Final round with tools disabled: guide the model to produce its answer
+            // directly instead of attempting tool calls (which causes DSML on DeepSeek).
+            if !use_tools && round > 0 {
+                messages.push(ChatMessage {
+                    role: MessageRole::System,
+                    content: "你已经收集了足够的数据。请立即基于以上已获取的所有数据和信息生成完整的最终回答，不要再尝试调用任何工具。直接输出分析结论。".to_string(),
+                    name: None, tool_calls: None, tool_call_id: None,
+                });
+            }
+
             sink.on_thinking(round as u32, stream_id);
+
+            Self::trim_context_if_needed(&mut messages, 120_000);
 
             let req = ChatRequest {
                 messages: messages.clone(),
@@ -185,14 +230,31 @@ impl AgentEngine {
                 max_tokens: None,
             };
 
-            tracing::info!("[Engine] Round {} - calling model with {} messages, tools: {}", round, messages.len(), use_tools);
+            let msg_chars: usize = messages.iter().map(|m| m.content.len()).sum();
+            tracing::info!("[Engine] Round {} - calling model with {} messages ({} chars), tools: {}", round, messages.len(), msg_chars, use_tools);
 
-            let resp = match self.provider.chat(req).await {
-                Ok(r) => r,
-                Err(e) => {
-                    tracing::error!("[Engine] Model call FAILED: {}", e);
-                    sink.on_error(&e.to_string(), stream_id);
-                    return format!("模型调用失败: {}", e);
+            let resp = {
+                let mut last_err = String::new();
+                let mut result = None;
+                for attempt in 0..=1 {
+                    match self.provider.chat(req.clone()).await {
+                        Ok(r) => { result = Some(r); break; }
+                        Err(e) => {
+                            last_err = e.to_string();
+                            if attempt == 0 {
+                                tracing::warn!("[Engine] Model call failed (attempt 1), retrying in 2s: {}", &last_err[..last_err.len().min(200)]);
+                                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                            }
+                        }
+                    }
+                }
+                match result {
+                    Some(r) => r,
+                    None => {
+                        tracing::error!("[Engine] Model call FAILED after 2 attempts: {}", last_err);
+                        sink.on_error(&last_err, stream_id);
+                        return format!("模型调用失败: {}", last_err);
+                    }
                 }
             };
 
@@ -231,17 +293,33 @@ impl AgentEngine {
 
             let content = resp.message.content;
             if content.contains("DSML") && content.contains("function_calls") {
-                tracing::warn!("DSML detected, retrying with streaming (no tools)");
+                tracing::warn!("DSML detected, retrying without tools");
+                if !sink.needs_streaming() {
+                    let clean = Self::build_clean_messages(&messages);
+                    let retry_req = ChatRequest {
+                        messages: clean,
+                        tools: None,
+                        temperature: 0.7,
+                        max_tokens: None,
+                    };
+                    if let Ok(retry_resp) = self.provider.chat(retry_req).await {
+                        let c = retry_resp.message.content;
+                        if !c.is_empty() && !c.contains("DSML") {
+                            sink.on_final_answer(&c, stream_id);
+                            sink.on_done(stream_id);
+                            return c;
+                        }
+                    }
+                    let fallback = "抱歉，AI 返回了异常格式。请重试一次。".to_string();
+                    sink.on_final_answer(&fallback, stream_id);
+                    sink.on_done(stream_id);
+                    return fallback;
+                }
                 return self.stream_final_answer(&messages, sink, stream_id).await;
             }
 
             if !content.is_empty() {
-                // For remote sinks (Feishu etc.): if we already have final content and
-                // there were tool calls in history, we still need stream_final_answer
-                // to reformat tool data cleanly. But if no tools were used at all,
-                // skip the redundant second LLM call entirely.
-                let had_tools = messages.iter().any(|m| m.role == MessageRole::Tool);
-                if !sink.needs_streaming() && !had_tools {
+                if !sink.needs_streaming() {
                     tracing::info!("[Engine] Remote sink: returning content directly (skipping stream_final_answer)");
                     sink.on_final_answer(&content, stream_id);
                     sink.on_done(stream_id);
@@ -442,6 +520,8 @@ impl AgentEngine {
 
             sink.on_thinking(round as u32, stream_id);
 
+            Self::trim_context_if_needed(&mut messages, 120_000);
+
             let req = ChatRequest {
                 messages: messages.clone(),
                 tools: if use_tools { Some(self.tool_defs.clone()) } else { None },
@@ -449,13 +529,30 @@ impl AgentEngine {
                 max_tokens: None,
             };
 
-            tracing::info!("[Engine] Round {} - calling model with {} messages, tools: {}", round, messages.len(), use_tools);
+            let msg_chars: usize = messages.iter().map(|m| m.content.len()).sum();
+            tracing::info!("[Engine] Round {} - calling model with {} messages ({} chars), tools: {}", round, messages.len(), msg_chars, use_tools);
 
-            let resp = match self.provider.chat(req).await {
-                Ok(r) => r,
-                Err(e) => {
-                    tracing::error!("[Engine] Model call FAILED: {}", e);
-                    return format!("模型调用失败: {}", e);
+            let resp = {
+                let mut last_err = String::new();
+                let mut result = None;
+                for attempt in 0..=1 {
+                    match self.provider.chat(req.clone()).await {
+                        Ok(r) => { result = Some(r); break; }
+                        Err(e) => {
+                            last_err = e.to_string();
+                            if attempt == 0 {
+                                tracing::warn!("[Engine] Model call failed (attempt 1), retrying in 2s: {}", &last_err[..last_err.len().min(200)]);
+                                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                            }
+                        }
+                    }
+                }
+                match result {
+                    Some(r) => r,
+                    None => {
+                        tracing::error!("[Engine] Model call FAILED after 2 attempts: {}", last_err);
+                        return format!("模型调用失败: {}", last_err);
+                    }
                 }
             };
 
@@ -546,7 +643,19 @@ impl AgentEngine {
         // Execute
         sink.on_tool_call(step_id, &tc.name, &tc.arguments, "running", stream_id);
 
-        let raw_result = crate::commands::dispatch_tool(tc, &self.file_ops, &self.shell).await;
+        // Route MCP tools to the MCP client manager
+        let raw_result = if let Some(ref mcp) = self.mcp_client {
+            if mcp.is_mcp_tool(&tc.name).await {
+                match mcp.call_tool(&tc.name, &tc.arguments).await {
+                    Ok(r) => r,
+                    Err(e) => format!("MCP tool '{}' failed: {}", tc.name, e),
+                }
+            } else {
+                crate::commands::dispatch_tool(tc, &self.file_ops, &self.shell).await
+            }
+        } else {
+            crate::commands::dispatch_tool(tc, &self.file_ops, &self.shell).await
+        };
         let result = self.resolve_tool_action(&raw_result).await;
 
         // Audit
@@ -561,16 +670,9 @@ impl AgentEngine {
         result
     }
 
-    async fn stream_final_answer(
-        &self,
-        messages: &[ChatMessage],
-        sink: &dyn EventSink,
-        stream_id: &str,
-    ) -> String {
-        use futures::StreamExt;
-
-        // Extract tool results as context, then build clean messages without tool protocol.
-        // This avoids API errors from providers that reject tool_calls without tools defined.
+    /// Strip tool protocol messages and inject tool results as plain-text context.
+    /// Produces a clean message list that won't trigger DSML from the model.
+    fn build_clean_messages(messages: &[ChatMessage]) -> Vec<ChatMessage> {
         let mut tool_results: Vec<String> = Vec::new();
         for m in messages {
             if m.role == MessageRole::Tool {
@@ -580,7 +682,7 @@ impl AgentEngine {
             }
         }
 
-        let mut clean_messages: Vec<ChatMessage> = messages.iter()
+        let mut clean: Vec<ChatMessage> = messages.iter()
             .filter(|m| {
                 if m.role == MessageRole::Tool { return false; }
                 if m.role == MessageRole::Assistant && m.content.is_empty() && m.tool_calls.is_some() { return false; }
@@ -590,18 +692,29 @@ impl AgentEngine {
             .cloned()
             .collect();
 
-        // Inject tool results as system context so the model can reference actual data
         if !tool_results.is_empty() {
             let context = format!(
                 "以下是工具调用返回的实际数据，请基于这些数据回答用户，不要编造：\n{}",
                 tool_results.join("\n")
             );
-            clean_messages.insert(1.min(clean_messages.len()), ChatMessage {
+            clean.insert(1.min(clean.len()), ChatMessage {
                 role: MessageRole::System,
                 content: context,
                 name: None, tool_calls: None, tool_call_id: None,
             });
         }
+        clean
+    }
+
+    async fn stream_final_answer(
+        &self,
+        messages: &[ChatMessage],
+        sink: &dyn EventSink,
+        stream_id: &str,
+    ) -> String {
+        use futures::StreamExt;
+
+        let clean_messages = Self::build_clean_messages(messages);
 
         let req = ChatRequest {
             messages: clean_messages,
@@ -643,26 +756,7 @@ impl AgentEngine {
             }
             Err(e) => {
                 tracing::error!("[Engine] Stream init failed: {}, falling back to non-stream", e);
-                let mut clean_fallback: Vec<ChatMessage> = messages.iter()
-                    .filter(|m| {
-                        if m.role == MessageRole::Tool { return false; }
-                        if m.role == MessageRole::Assistant && m.content.is_empty() && m.tool_calls.is_some() { return false; }
-                        if m.role == MessageRole::Assistant && !m.content.is_empty() && m.tool_calls.is_none() { return false; }
-                        true
-                    })
-                    .cloned()
-                    .collect();
-                if !tool_results.is_empty() {
-                    let context = format!(
-                        "以下是工具调用返回的实际数据，请基于这些数据回答用户，不要编造：\n{}",
-                        tool_results.join("\n")
-                    );
-                    clean_fallback.insert(1.min(clean_fallback.len()), ChatMessage {
-                        role: MessageRole::System,
-                        content: context,
-                        name: None, tool_calls: None, tool_call_id: None,
-                    });
-                }
+                let clean_fallback = Self::build_clean_messages(messages);
                 match self.provider.chat(ChatRequest {
                     messages: clean_fallback,
                     tools: None,

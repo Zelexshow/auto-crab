@@ -22,6 +22,8 @@ pub struct AppConfig {
     pub search: SearchConfig,
     #[serde(default)]
     pub knowledge: KnowledgeConfig,
+    #[serde(default)]
+    pub mcp: McpConfig,
 }
 
 impl AppConfig {
@@ -349,6 +351,49 @@ fn default_vault_routing() -> HashMap<String, String> {
     m.insert("boss".into(), "boss-explore".into());
     m.insert("news".into(), "hot-news".into());
     m
+}
+
+/// MCP (Model Context Protocol) configuration.
+/// Allows Auto-Crab to connect to external MCP servers (client mode)
+/// and expose its own tools via MCP (server mode).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpConfig {
+    /// Enable MCP client (connect to external MCP servers for extended tools).
+    #[serde(default)]
+    pub client_enabled: bool,
+    /// Enable MCP server (expose Auto-Crab tools to external AI clients via stdio).
+    #[serde(default)]
+    pub server_enabled: bool,
+    /// External MCP servers to connect to.
+    #[serde(default)]
+    pub servers: Vec<McpServerEntry>,
+}
+
+impl Default for McpConfig {
+    fn default() -> Self {
+        Self {
+            client_enabled: false,
+            server_enabled: false,
+            servers: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpServerEntry {
+    /// Display name for this server.
+    pub name: String,
+    /// Command to spawn the MCP server process.
+    pub command: String,
+    /// Arguments to pass to the command.
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Environment variables for the subprocess.
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+    /// Whether this server is enabled.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
 }
 
 fn default_search_provider() -> String {

@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open as dialogOpen } from "@tauri-apps/plugin-dialog";
-import { Save, Key, Shield, Bot, Globe, Terminal, ChevronRight, Loader2, FolderOpen, Clock, Sparkles, Plus, Trash2, Upload, BookOpen } from "lucide-react";
+import { Save, Key, Shield, Bot, Globe, Terminal, ChevronRight, Loader2, FolderOpen, Clock, Sparkles, Plus, Trash2, Upload, BookOpen, Plug2, ChevronDown } from "lucide-react";
 
 const PROVIDERS = [
   { value: "", label: "未配置" },
@@ -158,6 +158,16 @@ export function SettingsView() {
   const [configSaveMsg, setConfigSaveMsg] = useState("");
   const [credentialStatuses, setCredentialStatuses] = useState<Record<string, boolean>>({});
 
+  // MCP
+  const [mcpClientEnabled, setMcpClientEnabled] = useState(false);
+  const [mcpServerEnabled, setMcpServerEnabled] = useState(false);
+  const [mcpServers, setMcpServers] = useState<{ name: string; command: string; args: string[]; env: Record<string, string>; enabled: boolean }[]>([]);
+  const [mcpStatus, setMcpStatus] = useState<[string, number][]>([]);
+  const [expandedMcpServer, setExpandedMcpServer] = useState<number | null>(null);
+  const [newMcpName, setNewMcpName] = useState("");
+  const [newMcpCommand, setNewMcpCommand] = useState("");
+  const [newMcpArgs, setNewMcpArgs] = useState("");
+
   // Load actual config on mount
   useEffect(() => {
     invoke<{ success: boolean; data?: any }>("get_config").then((res) => {
@@ -222,8 +232,17 @@ export function SettingsView() {
       if (cfg.agent) {
         setCustomInstructions(cfg.agent.custom_instructions ?? "");
       }
+      if (cfg.mcp) {
+        setMcpClientEnabled(cfg.mcp.client_enabled ?? false);
+        setMcpServerEnabled(cfg.mcp.server_enabled ?? false);
+        setMcpServers(cfg.mcp.servers ?? []);
+      }
       setConfigLoaded(true);
     }).catch(() => setConfigLoaded(true));
+
+    invoke<{ success: boolean; data?: [string, number][] }>("get_mcp_status").then((res) => {
+      if (res.success && res.data) setMcpStatus(res.data);
+    }).catch(() => {});
 
     invoke<{ success: boolean; data?: { name: string; content: string }[] }>("list_skills").then((res) => {
       if (res.success && res.data) setUserSkills(res.data);
@@ -317,6 +336,11 @@ export function SettingsView() {
           save_conversations: vaultSaveConversations,
           routing: vaultRouting,
         },
+        mcp: {
+          client_enabled: mcpClientEnabled,
+          server_enabled: mcpServerEnabled,
+          servers: mcpServers,
+        },
       };
       await invoke("save_config", { configData: cfg });
 
@@ -353,6 +377,7 @@ export function SettingsView() {
     { id: "tools", label: "工具权限", icon: Terminal },
     { id: "remote", label: "远程控制", icon: Globe },
     { id: "knowledge", label: "知识库", icon: BookOpen },
+    { id: "mcp", label: "MCP 配置", icon: Plug2 },
     { id: "schedule", label: "定时任务", icon: Clock },
     { id: "skills", label: "自定义技能", icon: Sparkles },
     { id: "credentials", label: "密钥管理", icon: Key },
@@ -362,13 +387,19 @@ export function SettingsView() {
     <div className="flex h-full">
       {/* Left tabs */}
       <div
-        className="w-44 border-r shrink-0 py-4 flex flex-col"
-        style={{ borderColor: "var(--border)", background: "var(--bg-secondary)" }}
+        className="shrink-0 flex flex-col"
+        style={{
+          width: 200,
+          background: "var(--bg-secondary)",
+          borderRight: "1px solid var(--border)",
+        }}
       >
-        <h2 className="text-xs font-semibold px-4 pb-3 uppercase tracking-wider" style={{ color: "var(--text-muted)" }}>
-          设置
-        </h2>
-        <nav className="flex-1 px-2 space-y-0.5">
+        <div style={{ padding: "22px 20px 16px" }}>
+          <h2 className="text-[13px] font-semibold uppercase tracking-widest" style={{ color: "var(--text-muted)" }}>
+            设置
+          </h2>
+        </div>
+        <nav className="flex-1 px-2.5" style={{ display: "flex", flexDirection: "column", gap: 2 }}>
           {tabs.map((tab) => {
             const Icon = tab.icon;
             const active = activeTab === tab.id;
@@ -376,17 +407,18 @@ export function SettingsView() {
               <button
                 key={tab.id}
                 onClick={() => setActiveTab(tab.id)}
-                className="flex items-center justify-between w-full rounded-md px-3 py-2 text-sm transition-colors"
+                className="flex items-center justify-between w-full rounded-lg text-[13px] transition-colors"
                 style={{
+                  padding: "9px 14px",
                   background: active ? "var(--accent)" : "transparent",
                   color: active ? "#fff" : "var(--text-secondary)",
                 }}
               >
-                <span className="flex items-center gap-2">
-                  <Icon size={15} />
+                <span className="flex items-center gap-3">
+                  <Icon size={16} style={{ opacity: active ? 1 : 0.7 }} />
                   {tab.label}
                 </span>
-                {active && <ChevronRight size={14} />}
+                {active && <ChevronRight size={14} style={{ opacity: 0.7 }} />}
               </button>
             );
           })}
@@ -400,8 +432,8 @@ export function SettingsView() {
             <Loader2 size={16} className="animate-spin" /> 加载配置中...
           </div>
         ) : (
-        <div className="flex-1 overflow-y-auto p-6">
-        <div className="max-w-xl">
+        <div className="flex-1 overflow-y-auto" style={{ padding: "32px 40px" }}>
+        <div style={{ maxWidth: 820 }}>
 
           {/* ============ 模型配置 ============ */}
           {activeTab === "models" && (
@@ -471,7 +503,7 @@ export function SettingsView() {
                 <Row label="状态">
                   <ToggleLocked on label="始终开启" />
                 </Row>
-                <div className="mt-2 text-xs leading-5 space-y-1" style={{ color: "var(--text-muted)" }}>
+                <div className="mt-2 text-[13px] leading-5 space-y-1" style={{ color: "var(--text-muted)" }}>
                   <p>• <b style={{ color: "var(--success)" }}>安全操作</b>（读文件、搜索）→ 自动执行</p>
                   <p>• <b style={{ color: "var(--warning)" }}>中风险</b>（写文件、Git 提交）→ 弹窗确认</p>
                   <p>• <b style={{ color: "var(--danger)" }}>高风险</b>（执行命令、删除文件）→ 密码二次验证</p>
@@ -498,11 +530,11 @@ export function SettingsView() {
               </Card>
 
               <Card title="禁止操作列表" desc="以下操作永远不会被执行，无法通过任何方式绕过">
-                <div className="text-xs leading-5 space-y-0.5" style={{ color: "var(--text-muted)" }}>
+                <div className="text-[13px] leading-5 space-y-0.5" style={{ color: "var(--text-muted)" }}>
                   {["format_disk", "modify_boot", "disable_firewall", "access_credentials_raw", "modify_system_registry", "shutdown_system"].map((op) => (
                     <p key={op} className="flex items-center gap-1.5">
                       <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: "var(--danger)" }} />
-                      <code className="text-[11px]">{op}</code>
+                      <code className="text-[12px]">{op}</code>
                     </p>
                   ))}
                 </div>
@@ -524,7 +556,7 @@ export function SettingsView() {
                       onChange={setShellCommands}
                       placeholder="git, npm, python..."
                     />
-                    <p className="text-[11px] mt-1" style={{ color: "var(--text-muted)" }}>
+                    <p className="text-[12px] mt-1" style={{ color: "var(--text-muted)" }}>
                       逗号分隔，留空允许所有命令（不推荐）
                     </p>
                   </Row>
@@ -553,13 +585,13 @@ export function SettingsView() {
                           });
                         }
                       }}
-                      className="shrink-0 px-3 py-1.5 rounded-md text-xs flex items-center gap-1"
+                      className="shrink-0 px-3 py-1.5 rounded-md text-[13px] flex items-center gap-1"
                       style={{ background: "var(--bg-tertiary)", color: "var(--text-secondary)" }}
                     >
                       <FolderOpen size={13} /> 选择
                     </button>
                   </div>
-                  <p className="text-[11px] mt-1" style={{ color: "var(--text-muted)" }}>
+                  <p className="text-[12px] mt-1" style={{ color: "var(--text-muted)" }}>
                     逗号分隔的目录路径。留空表示允许访问所有目录。点击"选择"可用系统文件夹对话框添加。
                   </p>
                 </Row>
@@ -576,7 +608,7 @@ export function SettingsView() {
                       onChange={setNetworkDomains}
                       placeholder="留空 = 允许所有域名"
                     />
-                    <p className="text-[11px] mt-1" style={{ color: "var(--text-muted)" }}>
+                    <p className="text-[12px] mt-1" style={{ color: "var(--text-muted)" }}>
                       逗号分隔，例如: github.com, *.npmjs.org
                     </p>
                   </Row>
@@ -604,7 +636,7 @@ export function SettingsView() {
                     placeholder="xxxxxxxx（免费 250 次/月）"
                     type="password"
                   />
-                  <p className="text-[11px] mt-1" style={{ color: "var(--text-muted)" }}>
+                  <p className="text-[12px] mt-1" style={{ color: "var(--text-muted)" }}>
                     免费注册：<a href="https://serpapi.com" target="_blank" rel="noopener noreferrer" style={{ color: "var(--accent)" }}>serpapi.com</a>（无需信用卡，250 次/月）
                   </p>
                 </Row>
@@ -615,7 +647,7 @@ export function SettingsView() {
                     placeholder="BSAxxxxxxxx（免费 1000 次/月）"
                     type="password"
                   />
-                  <p className="text-[11px] mt-1" style={{ color: "var(--text-muted)" }}>
+                  <p className="text-[12px] mt-1" style={{ color: "var(--text-muted)" }}>
                     免费注册：<a href="https://brave.com/search/api/" target="_blank" rel="noopener noreferrer" style={{ color: "var(--accent)" }}>brave.com/search/api</a>（1000 次/月）
                   </p>
                 </Row>
@@ -626,11 +658,11 @@ export function SettingsView() {
                     placeholder="tvly-xxxxxxxx（免费 1000 credits/月）"
                     type="password"
                   />
-                  <p className="text-[11px] mt-1" style={{ color: "var(--text-muted)" }}>
+                  <p className="text-[12px] mt-1" style={{ color: "var(--text-muted)" }}>
                     免费注册：<a href="https://tavily.com" target="_blank" rel="noopener noreferrer" style={{ color: "var(--accent)" }}>tavily.com</a>（1000 credits/月，AI agent 优化搜索）
                   </p>
                 </Row>
-                <div className="mt-2 p-2 rounded text-[11px]" style={{ background: "var(--bg-tertiary)", color: "var(--text-muted)" }}>
+                <div className="mt-2 p-2 rounded text-[12px]" style={{ background: "var(--bg-tertiary)", color: "var(--text-muted)" }}>
                   搜索优先级：{searchProvider === "tavily" ? "Tavily" : searchProvider === "serpapi" ? "SerpApi (Google)" : searchProvider === "brave" ? "Brave" : tavilyApiKey || serpapiApiKey || braveApiKey ? "API 优先" : "DuckDuckGo"} → {tavilyApiKey && searchProvider !== "serpapi" && searchProvider !== "brave" ? "Tavily → " : ""}{serpapiApiKey && searchProvider !== "tavily" && searchProvider !== "brave" ? "SerpApi → " : ""}{braveApiKey && searchProvider !== "tavily" && searchProvider !== "serpapi" ? "Brave → " : ""}DuckDuckGo → SearXNG
                 </div>
               </Card>
@@ -653,19 +685,19 @@ export function SettingsView() {
                       <Input value={feishuAppId} onChange={setFeishuAppId} placeholder="cli_xxxxxxxx" />
                     </Row>
                     <Row label="App Secret">
-                      <span className="text-xs" style={{ color: "var(--text-muted)" }}>
-                        在「密钥管理」中保存，引用: <code className="px-1 py-0.5 rounded text-[11px]" style={{ background: "var(--bg-tertiary)" }}>keychain://feishu-secret</code>
+                      <span className="text-[13px]" style={{ color: "var(--text-muted)" }}>
+                        在「密钥管理」中保存，引用: <code className="px-1 py-0.5 rounded text-[12px]" style={{ background: "var(--bg-tertiary)" }}>keychain://feishu-secret</code>
                       </span>
                     </Row>
                     <Row label="轮询间隔">
                       <div className="flex items-center gap-2">
                         <Input value={feishuPollInterval} onChange={setFeishuPollInterval} placeholder="30" />
-                        <span className="text-xs shrink-0" style={{ color: "var(--text-muted)" }}>秒</span>
+                        <span className="text-[13px] shrink-0" style={{ color: "var(--text-muted)" }}>秒</span>
                       </div>
                     </Row>
                     <Row label="允许的用户">
                       <Input value={feishuAllowedUsers} onChange={setFeishuAllowedUsers} placeholder="user_id_1, user_id_2" />
-                      <p className="text-[11px] mt-1" style={{ color: "var(--text-muted)" }}>
+                      <p className="text-[12px] mt-1" style={{ color: "var(--text-muted)" }}>
                         逗号分隔的飞书用户 ID。留空 = 拒绝所有（安全默认）
                       </p>
                     </Row>
@@ -679,14 +711,14 @@ export function SettingsView() {
                       <Input value={wechatAgentId} onChange={setWechatAgentId} placeholder="1000001" />
                     </Row>
                     <Row label="Secret">
-                      <span className="text-xs" style={{ color: "var(--text-muted)" }}>
-                        在「密钥管理」中保存，引用: <code className="px-1 py-0.5 rounded text-[11px]" style={{ background: "var(--bg-tertiary)" }}>keychain://wechat-work-secret</code>
+                      <span className="text-[13px]" style={{ color: "var(--text-muted)" }}>
+                        在「密钥管理」中保存，引用: <code className="px-1 py-0.5 rounded text-[12px]" style={{ background: "var(--bg-tertiary)" }}>keychain://wechat-work-secret</code>
                       </span>
                     </Row>
                     <Row label="轮询间隔">
                       <div className="flex items-center gap-2">
                         <Input value={wechatPollInterval} onChange={setWechatPollInterval} placeholder="30" />
-                        <span className="text-xs shrink-0" style={{ color: "var(--text-muted)" }}>秒</span>
+                        <span className="text-[13px] shrink-0" style={{ color: "var(--text-muted)" }}>秒</span>
                       </div>
                     </Row>
                   </Card>
@@ -710,7 +742,7 @@ export function SettingsView() {
                         const dir = await dialogOpen({ directory: true, title: "选择知识库根目录" });
                         if (dir) setVaultPath(dir as string);
                       }}
-                      className="px-3 py-1.5 rounded-md text-xs whitespace-nowrap"
+                      className="px-3 py-1.5 rounded-md text-[13px] whitespace-nowrap"
                       style={{ background: "var(--bg-tertiary)", color: "var(--text-secondary)", border: "1px solid var(--border)" }}
                     >
                       <FolderOpen size={14} />
@@ -720,7 +752,7 @@ export function SettingsView() {
                 <Row label="保存对话内容">
                   <div className="flex items-center gap-2">
                     <Toggle on={vaultSaveConversations} onChange={setVaultSaveConversations} />
-                    <span className="text-[11px]" style={{ color: "var(--text-muted)" }}>主动对话中的重要产出也存入知识库</span>
+                    <span className="text-[12px]" style={{ color: "var(--text-muted)" }}>主动对话中的重要产出也存入知识库</span>
                   </div>
                 </Row>
               </Card>
@@ -736,10 +768,10 @@ export function SettingsView() {
                     <div key={item.key} className="flex items-center gap-3 p-2 rounded" style={{ background: "var(--bg-tertiary)" }}>
                       <span className="text-lg">{item.icon}</span>
                       <div className="flex-1 min-w-0">
-                        <div className="text-xs font-medium" style={{ color: "var(--text-primary)" }}>{item.label}</div>
-                        <div className="text-[10px]" style={{ color: "var(--text-muted)" }}>{item.desc}</div>
+                        <div className="text-[13px] font-medium" style={{ color: "var(--text-primary)" }}>{item.label}</div>
+                        <div className="text-[11px]" style={{ color: "var(--text-muted)" }}>{item.desc}</div>
                       </div>
-                      <span className="text-[11px] font-mono px-2 py-0.5 rounded" style={{ background: "var(--bg-primary)", color: "var(--accent)" }}>
+                      <span className="text-[12px] font-mono px-2 py-0.5 rounded" style={{ background: "var(--bg-primary)", color: "var(--accent)" }}>
                         {vaultRouting[item.key] || (item.key === "invest" ? "invest-explore" : item.key === "boss" ? "boss-explore" : item.key === "news" ? "hot-news" : "general")}
                       </span>
                     </div>
@@ -747,13 +779,191 @@ export function SettingsView() {
                 </div>
               </Card>
 
-              <div className="text-xs leading-5 space-y-1 p-3 rounded-lg" style={{ background: "var(--bg-secondary)", border: "1px solid var(--border)", color: "var(--text-muted)" }}>
+              <div className="text-[13px] leading-5 space-y-1 p-3 rounded-lg" style={{ background: "var(--bg-secondary)", border: "1px solid var(--border)", color: "var(--text-muted)" }}>
                 <p className="font-medium" style={{ color: "var(--text-secondary)" }}>工作方式</p>
                 <p>• 每次定时任务产出后，根据任务类型自动存入对应目录</p>
-                <p>• 文件结构：<code className="px-1 py-0.5 rounded text-[11px]" style={{ background: "var(--bg-tertiary)" }}>invest-explore/2026-03-28/0935-晨间投资简报.md</code></p>
+                <p>• 文件结构：<code className="px-1 py-0.5 rounded text-[12px]" style={{ background: "var(--bg-tertiary)" }}>invest-explore/2026-03-28/0935-晨间投资简报.md</code></p>
                 <p>• 每个文件带 YAML frontmatter（date/tags/category），Obsidian 可直接检索和关联</p>
                 <p>• 周度复盘自动读取三个目录的近 7 天笔记，生成综合分析报告</p>
                 <p>• 支持 Obsidian、Logseq 或任何基于 Markdown 文件的知识库工具</p>
+              </div>
+            </Section>
+          )}
+
+          {/* ============ MCP 配置 ============ */}
+          {activeTab === "mcp" && (
+            <Section title="MCP 协议配置" desc="连接外部 MCP 服务器扩展工具能力，或将 Auto-Crab 作为 MCP 服务器暴露给 Cursor/Claude 等 AI 客户端。">
+              <Card title="协议开关" desc="选择启用 MCP 客户端或服务端模式">
+                <Row label="MCP 客户端（连接外部服务器）">
+                  <div className="flex items-center gap-2">
+                    <Toggle on={mcpClientEnabled} onChange={setMcpClientEnabled} />
+                    <span className="text-[12px]" style={{ color: "var(--text-muted)" }}>连接外部 MCP 服务器，获取更多工具</span>
+                  </div>
+                </Row>
+                <Row label="MCP 服务端（暴露工具给外部）">
+                  <div className="flex items-center gap-2">
+                    <Toggle on={mcpServerEnabled} onChange={setMcpServerEnabled} />
+                    <span className="text-[12px]" style={{ color: "var(--text-muted)" }}>通过 --mcp-server 启动 stdio 模式</span>
+                  </div>
+                </Row>
+              </Card>
+
+              {mcpClientEnabled && (
+                <>
+                  <Card title="外部 MCP 服务器" desc="添加需要连接的 MCP 服务器（如文件系统、数据库、API 工具等）">
+                    {mcpServers.map((srv, idx) => {
+                      const isExpanded = expandedMcpServer === idx;
+                      return (
+                        <div key={idx} className="rounded-lg mb-2" style={{ background: "var(--bg-tertiary)", border: "1px solid var(--border)" }}>
+                          <button
+                            className="w-full flex items-center justify-between p-3 text-left"
+                            onClick={() => setExpandedMcpServer(isExpanded ? null : idx)}
+                          >
+                            <div className="flex items-center gap-2 flex-1 min-w-0">
+                              <div className="w-2 h-2 rounded-full" style={{ background: srv.enabled ? "var(--success)" : "var(--text-muted)" }} />
+                              <span className="text-sm font-medium truncate" style={{ color: "var(--text-primary)" }}>{srv.name}</span>
+                              <span className="text-[11px] font-mono px-1.5 py-0.5 rounded" style={{ background: "var(--bg-primary)", color: "var(--text-muted)" }}>
+                                {srv.command}
+                              </span>
+                            </div>
+                            <div className="flex items-center gap-2 shrink-0">
+                              <Toggle on={srv.enabled} onChange={(v) => {
+                                const updated = [...mcpServers];
+                                updated[idx] = { ...updated[idx], enabled: v };
+                                setMcpServers(updated);
+                              }} />
+                              {isExpanded ? <ChevronDown size={14} style={{ color: "var(--text-muted)" }} /> : <ChevronRight size={14} style={{ color: "var(--text-muted)" }} />}
+                            </div>
+                          </button>
+                          {isExpanded && (
+                            <div className="px-3 pb-3 space-y-2 border-t" style={{ borderColor: "var(--border)" }}>
+                              <div className="pt-2">
+                                <label className="text-[12px] font-medium block mb-1" style={{ color: "var(--text-secondary)" }}>名称</label>
+                                <Input value={srv.name} onChange={(v) => {
+                                  const updated = [...mcpServers];
+                                  updated[idx] = { ...updated[idx], name: v };
+                                  setMcpServers(updated);
+                                }} placeholder="server-name" />
+                              </div>
+                              <div>
+                                <label className="text-[12px] font-medium block mb-1" style={{ color: "var(--text-secondary)" }}>命令</label>
+                                <Input value={srv.command} onChange={(v) => {
+                                  const updated = [...mcpServers];
+                                  updated[idx] = { ...updated[idx], command: v };
+                                  setMcpServers(updated);
+                                }} placeholder="npx / uvx / node / python" />
+                              </div>
+                              <div>
+                                <label className="text-[12px] font-medium block mb-1" style={{ color: "var(--text-secondary)" }}>参数 (空格分隔)</label>
+                                <Input value={srv.args.join(" ")} onChange={(v) => {
+                                  const updated = [...mcpServers];
+                                  updated[idx] = { ...updated[idx], args: v.split(/\s+/).filter(Boolean) };
+                                  setMcpServers(updated);
+                                }} placeholder="-m mcp_server --port 8080" />
+                              </div>
+                              <div>
+                                <label className="text-[12px] font-medium block mb-1" style={{ color: "var(--text-secondary)" }}>环境变量 (KEY=VALUE 每行一个)</label>
+                                <textarea
+                                  value={Object.entries(srv.env).map(([k, v]) => `${k}=${v}`).join("\n")}
+                                  onChange={(e) => {
+                                    const updated = [...mcpServers];
+                                    const env: Record<string, string> = {};
+                                    e.target.value.split("\n").forEach(line => {
+                                      const eqIdx = line.indexOf("=");
+                                      if (eqIdx > 0) env[line.slice(0, eqIdx).trim()] = line.slice(eqIdx + 1).trim();
+                                    });
+                                    updated[idx] = { ...updated[idx], env };
+                                    setMcpServers(updated);
+                                  }}
+                                  rows={2}
+                                  className="w-full rounded-md px-3 py-2 text-[13px]"
+                                  style={{
+                                    background: "var(--bg-primary)",
+                                    border: "1px solid var(--border)",
+                                    color: "var(--text-primary)",
+                                    resize: "vertical",
+                                    fontFamily: "monospace",
+                                  }}
+                                  placeholder="API_KEY=xxx&#10;NODE_ENV=production"
+                                />
+                              </div>
+                              <button
+                                onClick={() => setMcpServers(mcpServers.filter((_, i) => i !== idx))}
+                                className="flex items-center gap-1 text-[13px] mt-1 px-2 py-1 rounded"
+                                style={{ color: "var(--danger)" }}
+                              >
+                                <Trash2 size={12} /> 删除此服务器
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+
+                    {/* Add new server form */}
+                    <div className="mt-3 p-3 rounded-lg" style={{ background: "var(--bg-tertiary)", border: "1px dashed var(--border)" }}>
+                      <div className="text-[12px] font-medium mb-2" style={{ color: "var(--text-secondary)" }}>添加新服务器</div>
+                      <div className="flex gap-2">
+                        <div className="flex-1">
+                          <Input value={newMcpName} onChange={setNewMcpName} placeholder="名称 (如 filesystem)" />
+                        </div>
+                        <div className="flex-1">
+                          <Input value={newMcpCommand} onChange={setNewMcpCommand} placeholder="命令 (如 npx)" />
+                        </div>
+                        <div className="flex-1">
+                          <Input value={newMcpArgs} onChange={setNewMcpArgs} placeholder="参数 (空格分隔)" />
+                        </div>
+                        <button
+                          onClick={() => {
+                            if (!newMcpName.trim() || !newMcpCommand.trim()) return;
+                            setMcpServers([...mcpServers, {
+                              name: newMcpName.trim(),
+                              command: newMcpCommand.trim(),
+                              args: newMcpArgs.split(/\s+/).filter(Boolean),
+                              env: {},
+                              enabled: true,
+                            }]);
+                            setNewMcpName("");
+                            setNewMcpCommand("");
+                            setNewMcpArgs("");
+                          }}
+                          disabled={!newMcpName.trim() || !newMcpCommand.trim()}
+                          className="flex items-center gap-1 px-3 py-1.5 rounded-md text-[13px] text-white disabled:opacity-40"
+                          style={{ background: "var(--accent)" }}
+                        >
+                          <Plus size={13} /> 添加
+                        </button>
+                      </div>
+                    </div>
+                  </Card>
+
+                  {/* Connected server status */}
+                  {mcpStatus.length > 0 && (
+                    <Card title="连接状态" desc="当前已连接的 MCP 服务器及可用工具数量">
+                      <div className="space-y-2">
+                        {mcpStatus.map(([name, toolCount], i) => (
+                          <div key={i} className="flex items-center justify-between p-2.5 rounded-lg" style={{ background: "var(--bg-tertiary)" }}>
+                            <div className="flex items-center gap-2">
+                              <div className="w-2 h-2 rounded-full animate-pulse-dot" style={{ background: "var(--success)" }} />
+                              <span className="text-[13px] font-medium" style={{ color: "var(--text-primary)" }}>{name}</span>
+                            </div>
+                            <span className="text-[12px] tabular-nums px-2 py-0.5 rounded" style={{ background: "var(--bg-primary)", color: "var(--accent)" }}>
+                              {toolCount} 个工具
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </Card>
+                  )}
+                </>
+              )}
+
+              <div className="text-[13px] leading-5 space-y-1 p-3 rounded-lg" style={{ background: "var(--bg-secondary)", border: "1px solid var(--border)", color: "var(--text-muted)" }}>
+                <p className="font-medium" style={{ color: "var(--text-secondary)" }}>MCP 协议说明</p>
+                <p>• <strong>客户端模式</strong>：Auto-Crab 连接外部 MCP 服务器（如 filesystem、database、API 工具），扩展 Agent 的能力</p>
+                <p>• <strong>服务端模式</strong>：启动时加 <code className="px-1 py-0.5 rounded text-[12px]" style={{ background: "var(--bg-tertiary)" }}>--mcp-server</code> 参数，通过 stdio 向 Cursor / Claude Desktop 暴露 Auto-Crab 的工具</p>
+                <p>• 服务器通过 stdio 子进程通信，格式遵循 JSON-RPC 2.0 / MCP 规范</p>
+                <p>• 修改配置后需重启应用才能生效</p>
               </div>
             </Section>
           )}
@@ -767,7 +977,7 @@ export function SettingsView() {
                   <Toggle on={schedEnabled} onChange={setSchedEnabled} />
                 </div>
                 {schedEnabled && schedJobs.length === 0 && (
-                  <div className="mt-2 p-3 rounded text-xs" style={{ background: "var(--bg-primary)", color: "var(--text-muted)" }}>
+                  <div className="mt-2 p-3 rounded text-[13px]" style={{ background: "var(--bg-primary)", color: "var(--text-muted)" }}>
                     暂无任务，点击下方「添加」或「加载默认」来创建。需先配置远程控制（飞书）才能接收推送。
                   </div>
                 )}
@@ -787,14 +997,14 @@ export function SettingsView() {
                           <div className="flex items-center gap-2">
                             <h4 className="text-sm font-medium">{job.name}</h4>
                             {job.skill_ref && (
-                              <span className="px-1.5 py-0.5 rounded text-[10px]" style={{ background: "var(--accent)", color: "white", opacity: 0.8 }}>
+                              <span className="px-1.5 py-0.5 rounded text-[11px]" style={{ background: "var(--accent)", color: "white", opacity: 0.8 }}>
                                 {job.skill_ref}
                               </span>
                             )}
                           </div>
-                          <p className="text-[11px] mt-0.5" style={{ color: "var(--text-muted)" }}>Cron: {job.cron}</p>
+                          <p className="text-[12px] mt-0.5" style={{ color: "var(--text-muted)" }}>Cron: {job.cron}</p>
                           {!isExpanded && (
-                            <p className="text-xs mt-1 truncate" style={{ color: "var(--text-secondary)" }}>
+                            <p className="text-[13px] mt-1 truncate" style={{ color: "var(--text-secondary)" }}>
                               {job.action.slice(0, 80)}{job.action.length > 80 ? "..." : ""}
                             </p>
                           )}
@@ -809,7 +1019,7 @@ export function SettingsView() {
                             </Row>
                             <Row label="Cron 表达式">
                               <Input value={job.cron} onChange={(v) => { const u = [...schedJobs]; u[idx] = { ...u[idx], cron: v }; setSchedJobs(u); }} />
-                              <span className="text-[11px]" style={{ color: "var(--text-muted)" }}>
+                              <span className="text-[12px]" style={{ color: "var(--text-muted)" }}>
                                 格式：分(0-59) 时(0-23) 日(1-31) 月(1-12) 周(0-7, 1-5=工作日)
                               </span>
                             </Row>
@@ -834,7 +1044,7 @@ export function SettingsView() {
                                   <option key={s.name} value={s.name}>{s.name}</option>
                                 ))}
                               </select>
-                              <span className="text-[11px]" style={{ color: "var(--text-muted)" }}>选择技能后，指令内容会自动同步。也可在「自定义技能」中管理。</span>
+                              <span className="text-[12px]" style={{ color: "var(--text-muted)" }}>选择技能后，指令内容会自动同步。也可在「自定义技能」中管理。</span>
                             </Row>
                             <Row label="执行指令">
                               <textarea
@@ -848,11 +1058,11 @@ export function SettingsView() {
                           </div>
                           <div className="flex items-center justify-between">
                             <div className="flex items-center gap-2">
-                              <span className="text-xs" style={{ color: "var(--text-muted)" }}>自动执行</span>
+                              <span className="text-[13px]" style={{ color: "var(--text-muted)" }}>自动执行</span>
                               <Toggle on={job.auto_execute} onChange={(v) => { const u = [...schedJobs]; u[idx] = { ...u[idx], auto_execute: v }; setSchedJobs(u); }} />
                             </div>
                             <button onClick={() => { setSchedJobs(schedJobs.filter((_, i) => i !== idx)); setExpandedJob(null); }}
-                              className="flex items-center gap-1 px-2 py-1 rounded text-xs" style={{ color: "var(--danger)" }}>
+                              className="flex items-center gap-1 px-2 py-1 rounded text-[13px]" style={{ color: "var(--danger)" }}>
                               <Trash2 size={12} /> 删除
                             </button>
                           </div>
@@ -867,7 +1077,7 @@ export function SettingsView() {
                     </Row>
                     <Row label="Cron 表达式">
                       <Input value={newJobCron} onChange={setNewJobCron} placeholder="35 9 * * 1-5（分 时 日 月 周）" />
-                      <div className="mt-1.5 p-2.5 rounded text-[11px] leading-relaxed space-y-1.5" style={{ background: "var(--bg-primary)", border: "1px solid var(--border)", color: "var(--text-muted)" }}>
+                      <div className="mt-1.5 p-2.5 rounded text-[12px] leading-relaxed space-y-1.5" style={{ background: "var(--bg-primary)", border: "1px solid var(--border)", color: "var(--text-muted)" }}>
                         <p className="font-medium" style={{ color: "var(--text-secondary)" }}>Cron 格式：分 时 日 月 周（5个字段，空格分隔）</p>
                         <div className="grid grid-cols-5 gap-1 text-center">
                           {[
@@ -936,7 +1146,7 @@ export function SettingsView() {
                           setNewJobName(""); setNewJobCron(""); setNewJobAction(""); setNewJobSkillRef("");
                         }}
                         disabled={!newJobName || !newJobCron || !newJobAction}
-                        className="flex items-center gap-1 px-3 py-1.5 rounded-md text-xs text-white transition-colors disabled:opacity-50"
+                        className="flex items-center gap-1 px-3 py-1.5 rounded-md text-[13px] text-white transition-colors disabled:opacity-50"
                         style={{ background: "var(--accent)" }}
                       >
                         <Plus size={12} /> 添加
@@ -951,7 +1161,7 @@ export function SettingsView() {
                             { name: "夜盘分析", cron: "30 22 * * 1-5", action: "请生成夜盘分析报告。查询美股开盘表现、加密货币/黄金白银夜盘实时行情，分析对次日亚太市场影响。", auto_execute: true, skill_ref: "投资分析师" },
                             { name: "科技日报", cron: "0 8 * * *", action: "请生成今日科技圈早报。用 search_web 搜索最新动态，覆盖 AI/大模型、加密货币/Web3、机器人/自动化、科技公司动态，给出职业发展建议。", auto_execute: true, skill_ref: "科技日报" },
                           ])}
-                          className="px-3 py-1.5 rounded-md text-xs transition-colors"
+                          className="px-3 py-1.5 rounded-md text-[13px] transition-colors"
                           style={{ background: "var(--bg-tertiary)", color: "var(--text-secondary)" }}
                         >
                           加载默认（投资+科技日报）
@@ -990,10 +1200,10 @@ export function SettingsView() {
                       <div className="flex items-center gap-2">
                         <Sparkles size={14} style={{ color: "var(--accent)" }} />
                         <h4 className="text-sm font-medium">{skill.name}</h4>
-                        {skill.always_on && <span className="px-1.5 py-0.5 rounded text-[10px]" style={{ background: "var(--accent)", color: "white", opacity: 0.8 }}>常驻</span>}
+                        {skill.always_on && <span className="px-1.5 py-0.5 rounded text-[11px]" style={{ background: "var(--accent)", color: "white", opacity: 0.8 }}>常驻</span>}
                       </div>
                       {!isExpanded && (
-                        <p className="text-xs mt-1 truncate" style={{ color: "var(--text-muted)" }}>
+                        <p className="text-[13px] mt-1 truncate" style={{ color: "var(--text-muted)" }}>
                           {skill.content.slice(0, 80)}{skill.content.length > 80 ? "..." : ""}
                         </p>
                       )}
@@ -1011,14 +1221,14 @@ export function SettingsView() {
                             value={(skill.keywords ?? []).join(", ")}
                             onChange={(v) => { const u = [...userSkills]; u[idx] = { ...u[idx], keywords: v.split(",").map(s => s.trim()).filter(Boolean) }; setUserSkills(u); }}
                           />
-                          <span className="text-[11px]" style={{ color: "var(--text-muted)" }}>
+                          <span className="text-[12px]" style={{ color: "var(--text-muted)" }}>
                             逗号分隔。用户消息中包含任一关键词时，此技能会自动激活。留空则根据技能名自动提取。
                           </span>
                         </Row>
                         <div className="flex items-center gap-2">
-                          <span className="text-xs" style={{ color: "var(--text-muted)" }}>始终激活</span>
+                          <span className="text-[13px]" style={{ color: "var(--text-muted)" }}>始终激活</span>
                           <Toggle on={skill.always_on ?? false} onChange={(v) => { const u = [...userSkills]; u[idx] = { ...u[idx], always_on: v }; setUserSkills(u); }} />
-                          <span className="text-[11px]" style={{ color: "var(--text-muted)" }}>开启后每次对话都会注入此技能（适合"简洁风格"等全局偏好）</span>
+                          <span className="text-[12px]" style={{ color: "var(--text-muted)" }}>开启后每次对话都会注入此技能（适合"简洁风格"等全局偏好）</span>
                         </div>
                         <Row label="技能内容">
                           <textarea
@@ -1031,7 +1241,7 @@ export function SettingsView() {
                         </Row>
                       </div>
                       <div className="flex justify-between items-center">
-                        <div className="text-[11px]" style={{ color: "var(--text-muted)" }}>
+                        <div className="text-[12px]" style={{ color: "var(--text-muted)" }}>
                           文件: <code className="px-1 py-0.5 rounded" style={{ background: "var(--bg-tertiary)" }}>{skill.name}.md</code>
                         </div>
                         <button onClick={async () => {
@@ -1039,7 +1249,7 @@ export function SettingsView() {
                           setUserSkills(userSkills.filter((_, i) => i !== idx));
                           setExpandedSkill(null);
                         }}
-                          className="flex items-center gap-1 px-2 py-1 rounded text-xs" style={{ color: "var(--danger)" }}>
+                          className="flex items-center gap-1 px-2 py-1 rounded text-[13px]" style={{ color: "var(--danger)" }}>
                           <Trash2 size={12} /> 删除技能
                         </button>
                       </div>
@@ -1060,7 +1270,7 @@ export function SettingsView() {
               >
                 <div>
                   <h4 className="text-sm font-medium">添加新技能</h4>
-                  <p className="text-[11px] mt-0.5" style={{ color: "var(--text-muted)" }}>手动编写、上传 .md 文件，或拖放文件到此区域</p>
+                  <p className="text-[12px] mt-0.5" style={{ color: "var(--text-muted)" }}>手动编写、上传 .md 文件，或拖放文件到此区域</p>
                 </div>
 
                 {dragOver && (
@@ -1082,14 +1292,14 @@ export function SettingsView() {
                     </Row>
                     <Row label="触发关键词">
                       <Input value={newSkillKeywords} onChange={setNewSkillKeywords} placeholder="逗号分隔，如：投资, 股票, A股, 行情" />
-                      <span className="text-[11px]" style={{ color: "var(--text-muted)" }}>
+                      <span className="text-[12px]" style={{ color: "var(--text-muted)" }}>
                         用户消息中包含任一关键词时自动激活此技能。留空则根据技能名自动提取。
                       </span>
                     </Row>
                     <div className="flex items-center gap-2">
-                      <span className="text-xs" style={{ color: "var(--text-muted)" }}>始终激活</span>
+                      <span className="text-[13px]" style={{ color: "var(--text-muted)" }}>始终激活</span>
                       <Toggle on={newSkillAlwaysOn} onChange={setNewSkillAlwaysOn} />
-                      <span className="text-[11px]" style={{ color: "var(--text-muted)" }}>开启后每次对话都注入（适合全局偏好类技能）</span>
+                      <span className="text-[12px]" style={{ color: "var(--text-muted)" }}>开启后每次对话都注入（适合全局偏好类技能）</span>
                     </div>
                     <Row label="技能内容">
                       <textarea
@@ -1100,7 +1310,7 @@ export function SettingsView() {
                         className="w-full rounded-md px-3 py-1.5 text-sm outline-none resize-y"
                         style={{ background: "var(--bg-primary)", border: "1px solid var(--border)", color: "var(--text-primary)" }}
                       />
-                      <p className="text-[11px] mt-1" style={{ color: "var(--text-muted)" }}>
+                      <p className="text-[12px] mt-1" style={{ color: "var(--text-muted)" }}>
                         提示：好的技能应包含 <strong>角色定义</strong>（你是谁）、<strong>分析框架</strong>（怎么做）、<strong>输出要求</strong>（格式/风格）。可点击下方「预填模板」快速开始。
                       </p>
                     </Row>
@@ -1115,14 +1325,14 @@ export function SettingsView() {
                           setNewSkillName(""); setNewSkillContent(""); setNewSkillKeywords(""); setNewSkillAlwaysOn(false);
                         }}
                         disabled={!newSkillName || !newSkillContent}
-                        className="flex items-center gap-1 px-3 py-1.5 rounded-md text-xs text-white transition-colors disabled:opacity-50"
+                        className="flex items-center gap-1 px-3 py-1.5 rounded-md text-[13px] text-white transition-colors disabled:opacity-50"
                         style={{ background: "var(--accent)" }}
                       >
                         <Plus size={12} /> 添加技能
                       </button>
                       <button
                         onClick={() => fileInputRef.current?.click()}
-                        className="flex items-center gap-1 px-3 py-1.5 rounded-md text-xs transition-colors"
+                        className="flex items-center gap-1 px-3 py-1.5 rounded-md text-[13px] transition-colors"
                         style={{ background: "var(--bg-tertiary)", color: "var(--text-secondary)", border: "1px solid var(--border)" }}
                       >
                         <Upload size={12} /> 上传 .md 文件
@@ -1151,7 +1361,7 @@ export function SettingsView() {
                             "- 给出明确的建议，不要模棱两可",
                           ].join("\n"));
                         }}
-                        className="px-3 py-1.5 rounded-md text-xs transition-colors"
+                        className="px-3 py-1.5 rounded-md text-[13px] transition-colors"
                         style={{ background: "var(--bg-tertiary)", color: "var(--text-secondary)", border: "1px solid var(--border)" }}
                       >
                         预填模板
@@ -1178,7 +1388,7 @@ export function SettingsView() {
                         await invoke("save_skill", { skill: tpl }).catch(() => {});
                         setUserSkills([...userSkills, tpl]);
                       }}
-                      className="px-3 py-1.5 rounded-md text-xs transition-colors"
+                      className="px-3 py-1.5 rounded-md text-[13px] transition-colors"
                       style={{ background: "var(--bg-tertiary)", color: "var(--text-secondary)", border: "1px solid var(--border)" }}
                     >
                       + {tpl.name}
@@ -1187,11 +1397,11 @@ export function SettingsView() {
                 </div>
               </Card>
 
-              <div className="p-3 rounded-lg text-xs space-y-1.5" style={{ background: "var(--bg-secondary)", border: "1px solid var(--border)", color: "var(--text-muted)" }}>
+              <div className="p-3 rounded-lg text-[13px] space-y-1.5" style={{ background: "var(--bg-secondary)", border: "1px solid var(--border)", color: "var(--text-muted)" }}>
                 <p className="font-medium" style={{ color: "var(--text-secondary)" }}>存储说明</p>
-                <p><strong>技能文件:</strong> 每个技能保存为独立 <code className="px-1 py-0.5 rounded text-[11px]" style={{ background: "var(--bg-tertiary)" }}>.md</code> 文件，可直接用编辑器修改</p>
-                <p><strong>技能目录:</strong> <code className="px-1 py-0.5 rounded text-[11px]" style={{ background: "var(--bg-tertiary)" }}>{skillsDir || "加载中..."}</code></p>
-                <p><strong>主配置:</strong> 定时任务、模型等保存在 <code className="px-1 py-0.5 rounded text-[11px]" style={{ background: "var(--bg-tertiary)" }}>auto-crab.toml</code>（同目录）</p>
+                <p><strong>技能文件:</strong> 每个技能保存为独立 <code className="px-1 py-0.5 rounded text-[12px]" style={{ background: "var(--bg-tertiary)" }}>.md</code> 文件，可直接用编辑器修改</p>
+                <p><strong>技能目录:</strong> <code className="px-1 py-0.5 rounded text-[12px]" style={{ background: "var(--bg-tertiary)" }}>{skillsDir || "加载中..."}</code></p>
+                <p><strong>主配置:</strong> 定时任务、模型等保存在 <code className="px-1 py-0.5 rounded text-[12px]" style={{ background: "var(--bg-tertiary)" }}>auto-crab.toml</code>（同目录）</p>
                 <p><strong>全局指令:</strong> 始终注入到系统提示词，影响所有对话和定时任务</p>
                 <p><strong>命名技能:</strong> 可在定时任务中通过下拉选择引用，也会注入到系统提示词</p>
               </div>
@@ -1211,7 +1421,7 @@ export function SettingsView() {
                     { key: "moonshot", label: "Kimi (Moonshot)" },
                     { key: "openai", label: "OpenAI" },
                     { key: "anthropic", label: "Anthropic (Claude)" },
-                  ].map(({ key: k, label }) => (
+                  ].map(({ key: k }) => (
                     <CredentialRow key={k} name={k} exists={credentialStatuses[k]} onEdit={(name) => {
                       setKeyName(name);
                       setApiKeyInput("");
@@ -1226,14 +1436,14 @@ export function SettingsView() {
                 <div className="space-y-3">
                   <div className="flex items-center justify-between p-2 rounded" style={{ background: "var(--bg-tertiary)" }}>
                     <div className="flex items-center gap-2">
-                      <span className="text-xs font-medium" style={{ color: "var(--text-primary)" }}>Brave Search</span>
-                      <span className={`text-[10px] px-1.5 py-0.5 rounded`}
+                      <span className="text-[13px] font-medium" style={{ color: "var(--text-primary)" }}>Brave Search</span>
+                      <span className={`text-[11px] px-1.5 py-0.5 rounded`}
                         style={{ background: braveApiKey ? 'rgba(34,197,94,0.15)' : 'rgba(128,128,128,0.15)', color: braveApiKey ? '#22c55e' : '#9ca3af' }}>
                         {braveApiKey ? '已配置' : '未配置'}
                       </span>
                     </div>
                     {searchStats?.brave && (
-                      <div className="text-[11px]" style={{ color: "var(--text-muted)" }}>
+                      <div className="text-[12px]" style={{ color: "var(--text-muted)" }}>
                         本月: {searchStats.brave.used}/{searchStats.brave.quota}
                         <span className="ml-1" style={{ color: searchStats.brave.remaining > 100 ? '#22c55e' : '#ef4444' }}>
                           (剩余 {searchStats.brave.remaining})
@@ -1243,14 +1453,14 @@ export function SettingsView() {
                   </div>
                   <div className="flex items-center justify-between p-2 rounded" style={{ background: "var(--bg-tertiary)" }}>
                     <div className="flex items-center gap-2">
-                      <span className="text-xs font-medium" style={{ color: "var(--text-primary)" }}>SerpApi (Google)</span>
-                      <span className={`text-[10px] px-1.5 py-0.5 rounded`}
+                      <span className="text-[13px] font-medium" style={{ color: "var(--text-primary)" }}>SerpApi (Google)</span>
+                      <span className={`text-[11px] px-1.5 py-0.5 rounded`}
                         style={{ background: serpapiApiKey ? 'rgba(34,197,94,0.15)' : 'rgba(128,128,128,0.15)', color: serpapiApiKey ? '#22c55e' : '#9ca3af' }}>
                         {serpapiApiKey ? '已配置' : '未配置'}
                       </span>
                     </div>
                     {searchStats?.serpapi && (
-                      <div className="text-[11px]" style={{ color: "var(--text-muted)" }}>
+                      <div className="text-[12px]" style={{ color: "var(--text-muted)" }}>
                         本月: {searchStats.serpapi.used}/{searchStats.serpapi.quota}
                         <span className="ml-1" style={{ color: searchStats.serpapi.remaining > 50 ? '#22c55e' : '#ef4444' }}>
                           (剩余 {searchStats.serpapi.remaining})
@@ -1260,14 +1470,14 @@ export function SettingsView() {
                   </div>
                   <div className="flex items-center justify-between p-2 rounded" style={{ background: "var(--bg-tertiary)" }}>
                     <div className="flex items-center gap-2">
-                      <span className="text-xs font-medium" style={{ color: "var(--text-primary)" }}>Tavily</span>
-                      <span className={`text-[10px] px-1.5 py-0.5 rounded`}
+                      <span className="text-[13px] font-medium" style={{ color: "var(--text-primary)" }}>Tavily</span>
+                      <span className={`text-[11px] px-1.5 py-0.5 rounded`}
                         style={{ background: tavilyApiKey ? 'rgba(34,197,94,0.15)' : 'rgba(128,128,128,0.15)', color: tavilyApiKey ? '#22c55e' : '#9ca3af' }}>
                         {tavilyApiKey ? '已配置' : '未配置'}
                       </span>
                     </div>
                     {searchStats?.tavily && (
-                      <div className="text-[11px]" style={{ color: "var(--text-muted)" }}>
+                      <div className="text-[12px]" style={{ color: "var(--text-muted)" }}>
                         本月: {searchStats.tavily.used}/{searchStats.tavily.quota}
                         <span className="ml-1" style={{ color: searchStats.tavily.remaining > 100 ? '#22c55e' : '#ef4444' }}>
                           (剩余 {searchStats.tavily.remaining})
@@ -1276,7 +1486,7 @@ export function SettingsView() {
                     )}
                   </div>
                 </div>
-                <p className="text-[11px] mt-2" style={{ color: "var(--text-muted)" }}>
+                <p className="text-[12px] mt-2" style={{ color: "var(--text-muted)" }}>
                   搜索 API Key 在「工具权限」标签页配置。搜索优先级：Tavily → SerpApi (Google) → Brave → DuckDuckGo → SearXNG
                 </p>
               </Card>
@@ -1354,17 +1564,17 @@ export function SettingsView() {
                     {saving ? "保存中..." : "保存到密钥链"}
                   </button>
                   {saveMsg && (
-                    <span className="text-xs" style={{ color: saveMsg.startsWith("✅") ? "var(--success)" : "var(--danger)" }}>
+                    <span className="text-[13px]" style={{ color: saveMsg.startsWith("✅") ? "var(--success)" : "var(--danger)" }}>
                       {saveMsg}
                     </span>
                   )}
                 </div>
               </Card>
 
-              <div className="text-xs leading-5 space-y-1 p-3 rounded-lg" style={{ background: "var(--bg-secondary)", border: "1px solid var(--border)", color: "var(--text-muted)" }}>
+              <div className="text-[13px] leading-5 space-y-1 p-3 rounded-lg" style={{ background: "var(--bg-secondary)", border: "1px solid var(--border)", color: "var(--text-muted)" }}>
                 <p className="font-medium" style={{ color: "var(--text-secondary)" }}>存储说明</p>
                 <p>• <strong>大模型/远程控制密钥</strong>：存储在操作系统级加密存储中（Windows Credential Store），不会出现在配置文件里</p>
-                <p>• <strong>搜索 API 密钥</strong>：保存在 <code className="px-1 py-0.5 rounded text-[11px]" style={{ background: "var(--bg-tertiary)" }}>auto-crab.toml</code> 配置文件的 <code>[search]</code> 段</p>
+                <p>• <strong>搜索 API 密钥</strong>：保存在 <code className="px-1 py-0.5 rounded text-[12px]" style={{ background: "var(--bg-tertiary)" }}>auto-crab.toml</code> 配置文件的 <code>[search]</code> 段</p>
                 <p>• 更新密钥只需使用相同的名称重新保存即可覆盖</p>
               </div>
             </Section>
@@ -1377,24 +1587,24 @@ export function SettingsView() {
         {/* Bottom save bar (shown for non-credential tabs) */}
         {configLoaded && activeTab !== "credentials" && (
           <div
-            className="shrink-0 px-6 py-3 flex items-center gap-3 border-t"
-            style={{ borderColor: "var(--border)", background: "var(--bg-secondary)" }}
+            className="shrink-0 flex items-center gap-3"
+            style={{ borderTop: "1px solid var(--border)", background: "var(--bg-secondary)", padding: "14px 40px" }}
           >
             <button
               onClick={handleSaveConfig}
               disabled={configSaving}
-              className="flex items-center gap-1.5 px-4 py-1.5 rounded-md text-sm text-white transition-colors disabled:opacity-50"
+              className="flex items-center gap-1.5 px-5 py-2 rounded-lg text-[13px] text-white transition-colors disabled:opacity-50"
               style={{ background: "var(--accent)" }}
             >
-              {configSaving ? <Loader2 size={13} className="animate-spin" /> : <Save size={13} />}
+              {configSaving ? <Loader2 size={14} className="animate-spin" /> : <Save size={14} />}
               {configSaving ? "保存中..." : "保存配置"}
             </button>
             {configSaveMsg && (
-              <span className="text-xs" style={{ color: configSaveMsg.startsWith("✅") ? "var(--success)" : "var(--danger)" }}>
+              <span className="text-[13px]" style={{ color: configSaveMsg.startsWith("✅") ? "var(--success)" : "var(--danger)" }}>
                 {configSaveMsg}
               </span>
             )}
-            <span className="text-xs ml-auto" style={{ color: "var(--text-muted)" }}>
+            <span className="text-[13px] ml-auto" style={{ color: "var(--text-muted)" }}>
               部分配置（远程控制、工具权限）需重启应用后生效
             </span>
           </div>
@@ -1420,12 +1630,12 @@ function KeyStatus({ provider, statuses }: { provider: string; statuses: Record<
     }
   }, [keyName, statuses]);
 
-  if (!provider || provider === "ollama") return <span className="text-xs" style={{ color: "var(--text-muted)" }}>本地模型，无需 API Key</span>;
+  if (!provider || provider === "ollama") return <span className="text-[13px]" style={{ color: "var(--text-muted)" }}>本地模型，无需 API Key</span>;
   const exists = statuses[keyName];
   return (
     <div className="flex items-center gap-2">
       <span className="inline-block w-2 h-2 rounded-full" style={{ background: exists ? "var(--success)" : "var(--danger)" }} />
-      <span className="text-xs" style={{ color: "var(--text-muted)" }}>
+      <span className="text-[13px]" style={{ color: "var(--text-muted)" }}>
         {exists
           ? `已配置 ${preview ? `(${preview})` : ""} — keychain://${keyName}`
           : `未配置，请在「密钥管理」中保存 keychain://${keyName}`}
@@ -1447,13 +1657,13 @@ function CredentialRow({ name, exists, onEdit }: { name: string; exists: boolean
   }, [name, exists]);
 
   return (
-    <div className="flex items-center justify-between text-xs py-1.5 px-2 rounded" style={{ background: "var(--bg-primary)" }}>
-      <div className="flex items-center gap-2">
+    <div className="flex items-center justify-between text-[13px] py-2.5 px-3 rounded-lg" style={{ background: "var(--bg-primary)" }}>
+      <div className="flex items-center gap-2.5">
         <span className="inline-block w-2 h-2 rounded-full" style={{ background: exists ? "var(--success)" : "var(--bg-tertiary)" }} />
         <code>{name}</code>
         {exists && preview && <span style={{ color: "var(--text-muted)" }}>({preview})</span>}
       </div>
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-3">
         {exists ? (
           <span style={{ color: "var(--success)" }}>已保存</span>
         ) : (
@@ -1461,7 +1671,7 @@ function CredentialRow({ name, exists, onEdit }: { name: string; exists: boolean
         )}
         <button
           onClick={() => onEdit(name, preview)}
-          className="px-2 py-0.5 rounded text-[11px] transition-colors"
+          className="px-3 py-1 rounded-md text-[12px] transition-colors"
           style={{ background: "var(--bg-tertiary)", color: "var(--text-secondary)" }}
         >
           {exists ? "修改" : "添加"}
@@ -1475,10 +1685,10 @@ function CredentialRow({ name, exists, onEdit }: { name: string; exists: boolean
 
 function Section({ title, desc, children }: { title: string; desc: string; children: React.ReactNode }) {
   return (
-    <div className="space-y-4">
+    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
       <div>
-        <h3 className="text-base font-semibold">{title}</h3>
-        {desc && <p className="text-xs mt-1" style={{ color: "var(--text-muted)" }}>{desc}</p>}
+        <h3 className="text-[17px] font-semibold" style={{ letterSpacing: "-0.01em" }}>{title}</h3>
+        {desc && <p className="text-[13px] leading-relaxed" style={{ color: "var(--text-muted)", marginTop: 6 }}>{desc}</p>}
       </div>
       {children}
     </div>
@@ -1488,11 +1698,22 @@ function Section({ title, desc, children }: { title: string; desc: string; child
 function Card({ title, desc, children }: { title: string; desc: string; children: React.ReactNode }) {
   return (
     <div
-      className="rounded-lg p-4 space-y-3"
-      style={{ background: "var(--bg-secondary)", border: "1px solid var(--border)" }}
+      className="rounded-xl"
+      style={{
+        background: "var(--bg-secondary)",
+        border: "1px solid var(--border)",
+        padding: "22px 26px",
+        display: "flex",
+        flexDirection: "column",
+        gap: 16,
+      }}
     >
-      {title && <h4 className="text-sm font-medium">{title}</h4>}
-      {desc && <p className="text-xs -mt-2" style={{ color: "var(--text-muted)" }}>{desc}</p>}
+      {(title || desc) && (
+        <div>
+          {title && <h4 className="text-[14px] font-medium">{title}</h4>}
+          {desc && <p className="text-[13px]" style={{ color: "var(--text-muted)", marginTop: 3 }}>{desc}</p>}
+        </div>
+      )}
       {children}
     </div>
   );
@@ -1500,25 +1721,26 @@ function Card({ title, desc, children }: { title: string; desc: string; children
 
 function Row({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <div className="flex flex-col gap-1">
-      <label className="text-xs font-medium" style={{ color: "var(--text-secondary)" }}>{label}</label>
+    <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+      <label className="text-[13px] font-medium" style={{ color: "var(--text-secondary)" }}>{label}</label>
       {children}
     </div>
   );
 }
 
-function Input({ value, onChange, placeholder }: { value: string; onChange: (v: string) => void; placeholder?: string }) {
+function Input({ value, onChange, placeholder, type = "text" }: { value: string; onChange: (v: string) => void; placeholder?: string; type?: string }) {
   return (
     <input
-      type="text"
+      type={type}
       value={value}
       onChange={(e) => onChange(e.target.value)}
       placeholder={placeholder}
-      className="w-full rounded-md px-3 py-1.5 text-sm outline-none"
+      className="w-full rounded-lg text-[13px] outline-none"
       style={{
         background: "var(--bg-primary)",
         border: "1px solid var(--border)",
         color: "var(--text-primary)",
+        padding: "9px 14px",
       }}
     />
   );
@@ -1533,15 +1755,16 @@ function Select({ value, onChange, options }: {
     <select
       value={value}
       onChange={(e) => onChange(e.target.value)}
-      className="w-full rounded-md px-3 py-1.5 text-sm outline-none appearance-none cursor-pointer"
+      className="w-full rounded-lg text-[13px] outline-none appearance-none cursor-pointer"
       style={{
         background: "var(--bg-primary)",
         border: "1px solid var(--border)",
         color: "var(--text-primary)",
+        padding: "9px 14px",
         backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E")`,
         backgroundRepeat: "no-repeat",
-        backgroundPosition: "right 10px center",
-        paddingRight: "32px",
+        backgroundPosition: "right 14px center",
+        paddingRight: "38px",
       }}
     >
       {options.map((o) => (
@@ -1555,12 +1778,12 @@ function Toggle({ on, onChange }: { on: boolean; onChange: (v: boolean) => void 
   return (
     <button
       onClick={() => onChange(!on)}
-      className="w-10 h-5 rounded-full relative transition-colors"
+      className="w-11 h-6 rounded-full relative transition-colors"
       style={{ background: on ? "#07c160" : "var(--bg-tertiary)" }}
     >
       <div
-        className="w-4 h-4 rounded-full bg-white absolute top-0.5 transition-all shadow-sm"
-        style={{ left: on ? "22px" : "2px" }}
+        className="w-5 h-5 rounded-full bg-white absolute transition-all shadow-sm"
+        style={{ top: 2, left: on ? "22px" : "2px" }}
       />
     </button>
   );
@@ -1570,15 +1793,15 @@ function ToggleLocked({ on, label }: { on: boolean; label: string }) {
   return (
     <div className="flex items-center gap-2">
       <div
-        className="w-10 h-5 rounded-full relative opacity-70 cursor-not-allowed"
+        className="w-11 h-6 rounded-full relative opacity-70 cursor-not-allowed"
         style={{ background: on ? "#07c160" : "var(--bg-tertiary)" }}
       >
         <div
-          className="w-4 h-4 rounded-full bg-white absolute top-0.5 shadow-sm"
-          style={{ left: on ? "22px" : "2px" }}
+          className="w-5 h-5 rounded-full bg-white absolute shadow-sm"
+          style={{ top: 2, left: on ? "22px" : "2px" }}
         />
       </div>
-      <span className="text-xs" style={{ color: "var(--text-muted)" }}>{label}</span>
+      <span className="text-[13px]" style={{ color: "var(--text-muted)" }}>{label}</span>
     </div>
   );
 }

@@ -24,22 +24,26 @@
 }
 
 [data-theme="dark"] {
-  --bg-primary: #0c0f1a;
-  --bg-secondary: #151929;
-  --bg-tertiary: #1f2537;
-  --bg-hover: #262d42;
-  --text-primary: #e8edf5;
-  --text-secondary: #8892a8;
-  --text-muted: #505a70;
-  --border: #232a3e;
+  --bg-primary: #0b0e18;
+  --bg-secondary: #121626;
+  --bg-tertiary: #1a1f32;
+  --bg-hover: #222840;
+  --text-primary: #e4e9f2;
+  --text-secondary: #8b95ad;
+  --text-muted: #4d5670;
+  --border: #1e2438;
   --accent: #818cf8;
   --accent-hover: #6366f1;
-  --accent-light: rgba(129, 140, 248, 0.1);
+  --accent-light: rgba(129, 140, 248, 0.12);
+  --danger: #f87171;
+  --warning: #fbbf24;
+  --success: #34d399;
   --user-bubble: #4f46e5;
-  --assistant-bubble: #1a2035;
-  --shadow-sm: 0 1px 2px rgba(0,0,0,0.2);
-  --shadow-md: 0 4px 12px rgba(0,0,0,0.25);
+  --assistant-bubble: #151a2d;
+  --shadow-sm: 0 1px 3px rgba(0,0,0,0.3);
+  --shadow-md: 0 4px 16px rgba(0,0,0,0.35);
   --radius: 10px;
+  --glass: rgba(255,255,255,0.03);
 }
 
 * {
@@ -135,6 +139,15 @@ input:focus, select:focus, textarea:focus {
   background: rgba(255,255,255,0.08) !important;
 }
 
+[data-theme="dark"] select {
+  color-scheme: dark;
+}
+
+[data-theme="dark"] input::placeholder,
+[data-theme="dark"] textarea::placeholder {
+  color: var(--text-muted);
+}
+
 @keyframes fadeIn {
   from { opacity: 0; transform: translateY(6px); }
   to { opacity: 1; transform: translateY(0); }
@@ -143,10 +156,133 @@ input:focus, select:focus, textarea:focus {
   animation: fadeIn 0.2s ease-out;
 }
 
+@keyframes slideInRight {
+  from { opacity: 0; transform: translateX(12px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+.animate-slide-in-right {
+  animation: slideInRight 0.25s ease-out;
+}
+
 @keyframes pulse-dot {
   0%, 100% { opacity: 0.4; }
   50% { opacity: 1; }
 }
 .animate-pulse-dot {
   animation: pulse-dot 1.2s ease-in-out infinite;
+}
+
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+.animate-shimmer {
+  background: linear-gradient(90deg, var(--bg-tertiary) 25%, var(--bg-hover) 50%, var(--bg-tertiary) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s ease-in-out infinite;
+}
+
+.perf-bar {
+  transition: width 0.6s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.stat-card {
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+.stat-card:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-md);
+}
+
+/* ---- Sidebar resize handle ---- */
+.sidebar-resize-handle {
+  position: absolute;
+  top: 0;
+  right: -3px;
+  width: 6px;
+  height: 100%;
+  cursor: col-resize;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.sidebar-resize-handle::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 2px;
+  width: 1px;
+  height: 100%;
+  background: var(--border);
+  transition: background 0.15s ease, width 0.15s ease, box-shadow 0.15s ease;
+}
+
+.sidebar-resize-handle:hover::before,
+.sidebar-resize-handle:active::before {
+  width: 3px;
+  right: 1px;
+  border-radius: 2px;
+  background: var(--accent);
+  box-shadow: 0 0 8px rgba(99, 102, 241, 0.3);
+}
+
+.sidebar-resize-indicator {
+  opacity: 0;
+  color: var(--accent);
+  transition: opacity 0.15s ease;
+  pointer-events: none;
+  position: relative;
+  z-index: 1;
+}
+
+.sidebar-resize-handle:hover .sidebar-resize-indicator {
+  opacity: 0.7;
+}
+
+/* ---- Tool panel resize handle (left edge, mirror of sidebar) ---- */
+.toolpanel-resize-handle {
+  position: absolute;
+  top: 0;
+  left: -3px;
+  width: 6px;
+  height: 100%;
+  cursor: col-resize;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.toolpanel-resize-handle::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 2px;
+  width: 1px;
+  height: 100%;
+  background: var(--border);
+  transition: background 0.15s ease, width 0.15s ease, box-shadow 0.15s ease;
+}
+
+.toolpanel-resize-handle:hover::before,
+.toolpanel-resize-handle:active::before {
+  width: 3px;
+  left: 1px;
+  border-radius: 2px;
+  background: var(--accent);
+  box-shadow: 0 0 8px rgba(99, 102, 241, 0.3);
+}
+
+.toolpanel-resize-handle:hover .sidebar-resize-indicator {
+  opacity: 0.7;
+}
+
+/* ---- Sidebar soft edge shadow (replaces hard border) ---- */
+[data-theme="light"] aside.relative {
+  box-shadow: 1px 0 0 var(--border), 4px 0 12px rgba(0, 0, 0, 0.03);
+}
+[data-theme="dark"] aside.relative {
+  box-shadow: 1px 0 0 var(--border), 4px 0 16px rgba(0, 0, 0, 0.2);
 }

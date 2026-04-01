@@ -224,6 +224,7 @@ auto-crab/
 │   │   │   └── approval_bridge.rs# 远程审批通知
 │   │   ├── security/             # 凭证管理、风险评估、审计日志
 │   │   ├── core/                 # Agent 抽象、上下文、调度器
+│   │   ├── mcp/                  # MCP Client / Server（rmcp，stdio）
 │   │   └── plugins/              # 插件沙箱（预留）
 │   ├── defaults/
 │   │   └── auto-crab.default.toml# 默认配置模板
@@ -555,7 +556,7 @@ sequenceDiagram
         BOT->>CMD: handle_remote_control_command()
         CMD->>CMD: 从 RemoteConversationState<br/>加载会话历史
 
-        loop 最多 7 轮工具调用
+        loop 最多 4 轮工具调用（远程优化后）
             CMD->>MR: provider.chat(request + tool_defs)
             MR->>LLM: POST /v1/chat/completions
             LLM-->>CMD: ChatResponse
@@ -711,6 +712,7 @@ graph TB
     CFG --> T["tools<br/>工具开关 / 白名单"]
     CFG --> R["remote<br/>飞书 / 企微 配置"]
     CFG --> SC["scheduled_tasks<br/>定时任务"]
+    CFG --> MCP["mcp<br/>Client / Server 开关与 servers 列表"]
 
     M --> M1["primary<br/>主力模型"]
     M --> M2["fallback<br/>备选模型"]
@@ -824,7 +826,7 @@ graph TB
 | 权限控制 | 工具级别的白名单/黑名单 | ✅ shell 命令白名单、域名白名单 | 无 |
 | 风险评估 | 高危操作需要人工审批 | ✅ `RiskEngine` + `ApprovalState` | 无 |
 | 工具组合 | 多工具协同（如截图→分析→操作） | ⚠️ 通过魔法字符串前缀实现，非正式的组合机制 | 中 |
-| 动态工具 | 运行时注册/发现新工具（MCP 协议） | ❌ 工具在编译时固定 | 中 |
+| 动态工具 | 运行时注册/发现新工具（MCP 协议） | ✅ 见下文「MCP 协议支持」：`rmcp` 客户端连接外部 Server；本进程也可作为 MCP Server 暴露内置工具 | 低 |
 
 #### 4. 行动 (Action) — 当前：✅ 已实现核心循环
 
@@ -994,10 +996,10 @@ auto-crab-java/
 graph TB
     subgraph "🟡 可优化"
         G5["工具串行执行<br/>独立工具不能并行"]
-        G6["硬编码工具集<br/>运行时无法动态注册新工具 (MCP)"]
     end
 
     subgraph "🟢 已完成"
+        G6["MCP 协议<br/>Client + Server (rmcp)"]
         G1["P3 任务规划器<br/>Planner 自动分解 + 反思"]
         G2["P2 长期记忆 RAG<br/>DashScope Embedding + 向量检索"]
         G3["P1 流式输出<br/>逐 token 推送"]
@@ -1107,6 +1109,7 @@ graph TB
 - `Planner::reflect()` — 每步执行后评估结果，决定 Continue / Retry / Skip / Abort / Revise
 - `should_plan()` — 启发式检测：包含"分析+并且"、"搜索+总结"等组合关键词的任务自动启用规划
 - `AgentEngine::run_with_plan()` — 规划模式执行路径，每步独立运行 Agent 循环（max_rounds=4）
+- **飞书等远程通道**：为降低延迟与成本，**不启用** Planner，仅走直接 Agent 循环（详见「Feishu 性能优化」）。
 
 **工作流程：**
 
@@ -1240,11 +1243,9 @@ graph TB
 
 **建议：** 统一为一个 `AgentEngine`，`commands.rs` 和 `remote/` 都使用同一个引擎，通过回调接口（EventEmitter）区分桌面推送和飞书回复。
 
-#### P6：支持 MCP 协议（动态工具）
+#### P6：支持 MCP 协议（动态工具）— 已完成
 
-**问题：** 工具集在编译时固定，无法运行时扩展。
-
-**建议：** 实现 [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) 客户端，允许用户在配置中声明 MCP 服务器，运行时动态发现和调用外部工具。这是 2025-2026 年 Agent 生态的趋势标准。
+已实现 MCP Client（连接外部 Server、发现工具、路由调用）与 MCP Server（向 Cursor / Claude Desktop 等暴露 Auto-Crab 工具）。详见下文「**MCP 协议支持**」；配置见 `[mcp]` TOML 与 CLI `--mcp-server`。
 
 ### 优化路线图
 
@@ -1271,6 +1272,254 @@ gantt
 
 ---
 
+## MCP 协议支持
+
+Auto-Crab 同时扮演 **MCP Client**（消费外部工具）与 **MCP Server**（对外暴露内置能力），基于 **[rmcp](https://crates.io/crates/rmcp) v1.3.0**，传输层为 **stdio**（标准输入输出），与 Cursor、Claude Desktop 等宿主常见接入方式一致。
+
+### MCP Client
+
+- 按配置启动子进程连接外部 MCP Server（stdio）。
+- 连接后执行 **tools/list** 发现工具，将工具定义合并进 Agent 可调用的工具集。
+- 模型返回 `tool_calls` 时，按名称路由到对应 MCP 工具并执行 **tools/call**，结果写回对话上下文。
+
+### MCP Server
+
+- 以独立模式运行（见 CLI），通过 stdio 提供 MCP 服务。
+- 暴露与桌面 Agent 对齐的一组工具，例如：`search_web`、`get_market_price`、`read_file`、`fetch_webpage`、`execute_shell`（具体以实现为准），供 Cursor / Claude Desktop 等作为外部 MCP 接入。
+
+### 配置与 CLI
+
+- TOML：`[mcp]` 段，含 `client_enabled`、`server_enabled`，以及 `servers` 列表（各 Server 的命令行与参数）。
+- 命令行：使用 **`--mcp-server`** 启动进程为 **MCP Server** 模式（无桌面 UI，仅 stdio 协议）。
+
+```mermaid
+flowchart LR
+    subgraph AutoCrab["Auto-Crab"]
+        AGENT["AgentEngine"]
+        REG["ToolRegistry<br/>内置工具"]
+        MCLI["MCP Client<br/>stdio 子进程"]
+        MSRV2["MCP Server<br/>--mcp-server 模式"]
+    end
+
+    subgraph External["外部"]
+        MSRV["其他 MCP Servers"]
+        IDE["Cursor / Claude Desktop"]
+    end
+
+    MSRV <-->|"stdio"| MCLI
+    MCLI -->|"tools/list + call"| AGENT
+    REG <--> AGENT
+
+    IDE <-->|"stdio"| MSRV2
+    MSRV2 -.->|"内置工具"| REG
+```
+
+---
+
+## 投资宏观分析增强
+
+在投资类任务上，系统在 **宏观框架、数据预取、情绪指标、技能文档与分析权重** 上做了增强，便于输出结构化、可复核的结论。
+
+| 维度 | 说明 |
+|------|------|
+| **经济周期框架** | 采用 **Merrill Lynch Clock（美林时钟）** 等框架，将资产与周期阶段对齐，作为叙事与配置的参照。 |
+| **宏观数据预取** | 预取或引用 **美联储 / 人民银行** 政策取向，**PMI、CPI、GDP** 等增长与物价指标，以及 **地缘与政策** 相关要点（具体来源以工具与 prompt 为准）。 |
+| **市场情绪** | 纳入 **VIX**、**北向资金** 等情绪与资金流指标，辅助判断风险偏好。 |
+| **技能（Skills）** | 配套技能升级：`投资分析师.md`、`晨间投资简报.md`、`经济周期框架.md` 等，统一话术与输出结构。 |
+| **分析权重** | 结论结构上强调 **宏观 60% → 技术面 25% → 可执行建议 15%**，避免过度依赖单一维度。 |
+
+```mermaid
+pie title 投资分析权重（示意）
+    "宏观 Macro" : 60
+    "技术 Technical" : 25
+    "行动 Action" : 15
+```
+
+---
+
+## Feishu 性能优化
+
+飞书等 **远程通道** 与桌面 WebView 不同：无逐 token 展示需求，且对延迟与飞书 API 限流更敏感。针对性优化如下。
+
+| 项 | 做法 |
+|----|------|
+| **Planner** | 远程会话 **关闭 Planner**，避免额外 LLM 轮次与分解开销。 |
+| **流式收尾** | 对 **非流式 EventSink** **跳过** `stream_final_answer`，直接非流式生成最终回复，减少无意义的流式管线。 |
+| **长期记忆** | 远程侧 **记忆召回超时 3s**，超时则放弃注入，避免阻塞整条链路。 |
+| **DSML** | 检测模型 **DSML / 格式异常** 时 **清理历史并重试**（与桌面侧策略对齐，减少坏消息卡死）。 |
+| **轮次** | Agent **`max_rounds` 由 6 降为 4**，缩短最坏情况下的工具链长度。 |
+| **指令** | 增加 **`/help`**、**`/new`**、**`/clear`**，便于用户自助重置会话与查看用法。 |
+
+---
+
+## 知识库集成（Obsidian）
+
+与 **Obsidian** 等本地库协作时，强调 **路径分类、YAML 兼容与可选会话落盘**。
+
+| 项 | 说明 |
+|----|------|
+| **按类目路由** | 写入内容按语义类目映射到不同目录，例如 **invest → invest-explore**，**boss → boss-explore**，**news → hot-news**（具体映射以配置与实现为准）。 |
+| **YAML Frontmatter** | 自动生成 **YAML 前置元数据**，便于 Obsidian 属性、Dataview 与双向链接。 |
+| **会话存档** | 配置 **`save_conversations`** 时，可将 **交互式对话输出** 按规则保存到知识库路径，便于复盘与二次编辑。 |
+
+```mermaid
+flowchart TB
+    subgraph Out["输出分类"]
+        I["invest"]
+        B["boss"]
+        N["news"]
+    end
+
+    subgraph Vault["Obsidian 库（示例）"]
+        P1["invest-explore/"]
+        P2["boss-explore/"]
+        P3["hot-news/"]
+    end
+
+    I --> P1
+    B --> P2
+    N --> P3
+
+    CHAT["交互聊天"] -->|"save_conversations"| P1
+```
+
+---
+
+## 统一数据目录
+
+所有运行时数据统一存储在 **Tauri 的 `app_data_dir`** 下，确保用户只需关注一个目录。
+
+### 路径约定
+
+| 平台 | 路径 |
+|------|------|
+| Windows | `%APPDATA%\com.zelex.auto-crab\` |
+| macOS | `~/Library/Application Support/com.zelex.auto-crab/` |
+| Linux | `~/.local/share/com.zelex.auto-crab/` |
+
+### 目录结构
+
+```
+com.zelex.auto-crab/
+├── auto-crab.toml           # 应用配置
+├── skills/                  # 自定义技能 (.md)
+├── conversations/           # 会话记录 (.json)
+├── perf-events.jsonl        # 性能监控事件（追加写入）
+├── audit.jsonl              # 安全审计日志
+├── long_memory/             # 长期记忆
+│   ├── vectors.json         # 向量索引
+│   └── entries/             # 记忆条目
+└── snapshots/               # 文件操作快照（/undo 用）
+```
+
+### 路径统一机制
+
+启动时通过 `app.path().app_data_dir()` 获取 Tauri 标准路径，写入全局 `APP_DATA_DIR: OnceLock<PathBuf>`。所有模块通过 `commands::app_data_dir()` 统一访问。
+
+> **注意：** 早期版本使用 `directories::ProjectDirs` crate 生成数据路径（如 `%APPDATA%\zelex\auto-crab\data\`），与 Tauri 路径不一致。已于 2026-04-01 统一为 Tauri 路径。如需迁移旧数据，将旧路径下的文件复制到新路径即可。
+
+---
+
+## 模型调用容错
+
+### 三层防护机制
+
+针对 LLM API 调用中的 "error decoding response body" 等瞬时故障，从 Provider → Engine → Context 三层逐级防御。
+
+```mermaid
+graph TB
+    subgraph "Provider 层 (openai_compat.rs)"
+        P1["resp.text() 先取原始文本"]
+        P2["serde_json::from_str 手动解析"]
+        P3["解析失败 → 日志记录前 300 字符原文"]
+    end
+
+    subgraph "Engine 层 (engine.rs)"
+        E1["首次调用失败 → 等待 2s"]
+        E2["自动重试 1 次"]
+        E3["两次都失败 → 返回错误"]
+    end
+
+    subgraph "Context 层 (engine.rs)"
+        C1["每轮调用前检查总字符数"]
+        C2["超过 120K 字符 → 截断 tool_result"]
+        C3[">2000 字符的结果 → 保留 1500 + 截断提示"]
+    end
+
+    P1 --> P2 --> P3
+    E1 --> E2 --> E3
+    C1 --> C2 --> C3
+
+    style P1 fill:#27AE60,stroke:#333,color:#fff
+    style E1 fill:#3498DB,stroke:#333,color:#fff
+    style C1 fill:#F39C12,stroke:#333,color:#fff
+```
+
+| 层级 | 防护措施 | 解决的问题 |
+|------|---------|-----------|
+| **Provider** | `resp.text()` + `serde_json::from_str` 替代 `resp.json()`；失败时日志打印原始响应前 300 字符 | API 返回 HTML 限流页、截断 JSON 时能准确定位 |
+| **Engine** | 模型调用失败后等 2 秒自动重试 1 次（run_direct 和 run_simple 两条路径均覆盖） | 网络抖动、API 瞬时限流可自动恢复 |
+| **Context** | 每轮调用前检测消息总字符数，超过 120K 时截断过长的 tool_result（>2000 字符→1500+提示） | 上下文过大导致 API 响应异常或超时 |
+
+---
+
+## 性能监控
+
+### 数据采集
+
+通过 `record_perf_event(event_type, label, duration_ms)` 在关键路径埋点，记录四类事件：
+
+| 事件类型 | 采集位置 | 说明 |
+|---------|---------|------|
+| `remote_chat` | `run_remote_chat_inner` | 飞书等远程聊天的端到端耗时 |
+| `enrich` | `enrich_scheduled_action` | 定时任务数据预取（市场数据、新闻、宏观指标）耗时 |
+| `tool_call` | `dispatch_tool_with_audit` | 单次工具调用耗时 |
+| `scheduled_task` | 定时任务主循环 | 定时任务完整执行（含 enrich + 模型调用）耗时 |
+
+### 持久化
+
+- **内存**：`PERF_EVENTS: LazyLock<Mutex<Vec<PerfEvent>>>`，最多保留最近 500 条
+- **磁盘**：每次记录时异步追加到 `perf-events.jsonl`（JSONL 格式，位于统一数据目录），无限追加
+- **加载**：应用启动时 `load_perf_events()` 从磁盘加载历史（最多 500 条），确保重启后数据不丢失
+- **查询**：`get_perf_metrics` Tauri 命令返回汇总统计 + 最近 50 条事件
+
+### 前端仪表盘
+
+`PerformanceDashboard.tsx` 位于侧边栏"监控"入口，自动每 30 秒刷新，展示：
+
+- **概览卡片**：聊天次数/平均耗时、数据预取次数/平均耗时、工具调用总数、定时任务总数
+- **搜索 API 用量**：Tavily / SerpApi / Brave 各自的已用/配额/剩余（含可视化进度条）
+- **MCP 服务器状态**：已连接的 MCP 服务器及其工具数量
+- **事件时间线**：最近 50 条事件的类型、耗时、时间戳（高耗时标红）
+
+---
+
+## Claude Code 架构参考
+
+参考 [anthropics/claude-code](https://github.com/anthropics/claude-code) 开源仓库的设计模式，以下是可借鉴的关键架构理念。
+
+> claude-code GitHub 仓库公开了其 **插件/扩展体系和策略/Hook 机制**，核心 TypeScript 运行时为闭源分发。
+
+### 可借鉴的设计模式
+
+| 模式 | Claude Code 做法 | Auto-Crab 对应 / 未来方向 |
+|------|-----------------|-------------------------|
+| **Hook 生命周期** | PreToolUse / PostToolUse / PostToolUseFailure / Stop / StopFailure / PreCompact / PostCompact | 可在 engine.rs 工具调用前后增加钩子回调，实现插件化安全审计 |
+| **Stop 否决机制** | Ralph 插件通过 Stop hook 否决终止，重新注入 prompt 继续执行 | 可用于长任务（如周报生成），失败时自动续跑而非直接结束 |
+| **能力清单制** | 每个 slash command 声明 `allowed-tools` 限定可用工具 | 可按任务类型限定工具集（投资分析禁用 shell，日常聊天禁用文件写入） |
+| **分层配置** | Enterprise → User → Project 三级，含 ask/deny 权限列表和沙盒模式 | 可实现"严格/宽松/开发"配置模板 |
+| **并行子代理** | code-review 插件用 4 个并行 reviewer + 验证阶段 | 投资分析可并行拉取不同市场数据再汇总 |
+| **MCP 命名空间** | 工具名用 `mcp__server__tool` 格式隔离 | 已在用类似方案 `mcp_{server}__tool` |
+| **JSONL 转录** | Ralph 读取 `transcript_path` 获取完整交互日志 | `perf-events.jsonl` 已采用相同格式 |
+
+### 优先落地项
+
+1. **PreToolUse / PostToolUseFailure Hook** — 在 engine.rs 工具执行前后增加可扩展的回调点
+2. **任务级工具白名单** — 按技能/定时任务限定可用工具集，减少不必要的工具调用
+3. **配置模板** — 提供 strict / default / dev 三套预设配置
+
+---
+
 ## 当前架构的注意事项
 
 ### 已实现但未完全打通的部分
@@ -1289,6 +1538,12 @@ gantt
 | 视觉模型 | ✅ 可用 | `vision` slot + DashScope VL 调用 + 压缩 + 重试 |
 | 流式传输 | ✅ 逐 token 流式 | `AgentEngine::stream_final_answer()` 用 `chat_stream()` 逐 token 推送 |
 | 定时任务调度 | ✅ 已完成 | `TaskScheduler` 接入主循环，本地时间 cron 匹配，飞书推送 |
+| MCP Client / Server | ✅ 已完成 | `rmcp` v1.3.0，`[mcp]` 配置，`--mcp-server` 对外暴露工具 |
+| 飞书远程优化 | ✅ 已完成 | 无 Planner、非流式跳过流式收尾、记忆 3s 超时、DSML 重试、max_rounds=4、`/help` `/new` `/clear` |
+| Obsidian / 知识库 | ✅ 已集成 | 类目路由、YAML frontmatter、`save_conversations` 可选落盘 |
+| 模型调用容错 | ✅ 已完成 | Provider 层详细日志 + Engine 层自动重试 + Context 层上下文截断，三层防护 |
+| 性能监控持久化 | ✅ 已完成 | `perf-events.jsonl` JSONL 落盘 + 启动加载，重启不丢数据 |
+| 统一数据目录 | ✅ 已完成 | 所有模块（审计、记忆、快照、性能）统一使用 Tauri `app_data_dir` |
 
 ### 架构优势
 
@@ -1297,7 +1552,10 @@ gantt
 - **事件输出抽象** — `EventSink` trait 解耦了 Agent 逻辑和通道实现，新增通道只需实现 trait
 - **安全分层清晰** — 凭证/风险/审计/审批各自独立，审批通过 `EventSink::request_approval()` 统一
 - **多通道接入** — 桌面 + 飞书 + 企业微信 + 定时任务复用同一套引擎/模型/工具链路
+- **模型调用弹性** — 三层容错（日志诊断 → 自动重试 → 上下文截断），减少 API 瞬时故障对用户的影响
 - **模型可插拔** — Provider trait 统一抽象，新增模型只需实现接口
 - **工具可扩展** — Registry 注册制，新增工具只需添加注册项 + dispatch 分支
 - **长期记忆 RAG** — DashScope Embedding + 本地向量检索，跨会话知识沉淀
+- **数据目录统一** — 所有运行时数据（配置、日志、记忆、监控）集中在 Tauri `app_data_dir` 下，备份迁移只需复制一个目录
+- **可观测性** — 性能监控 JSONL 持久化 + 前端仪表盘可视化，便于定位延迟瓶颈
 - **可单元测试** — `AgentEngine::run()` 可传入 `StringCollectorSink` 在无 UI 环境下测试

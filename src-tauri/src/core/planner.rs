@@ -257,15 +257,26 @@ pub fn should_plan(message: &str) -> bool {
 
     if len < 15 { return false; }
 
+    // Single-topic analysis questions should NOT trigger the planner — the model
+    // handles them better in one pass with skill prompts. Only truly multi-step
+    // *workflows* (do A then B then C) benefit from planning.
+    let single_topic_signals = [
+        "经济周期", "美林时钟", "资产配置", "投资建议", "行情分析",
+        "持仓分析", "宏观分析", "投资简报", "盘分析", "策略建议",
+        "周期阶段", "经济形势", "市场分析",
+    ];
+    if single_topic_signals.iter().any(|kw| msg.contains(*kw)) {
+        return false;
+    }
+
     let complex_markers = [
-        "分析", "并且", "然后", "之后", "同时",
+        "并且", "然后", "之后", "同时",
         "帮我做", "完成以下", "步骤",
-        "先.*再", "先.*然后",
-        "对比", "综合", "生成报告", "总结",
-        "投资建议", "完整方案", "系统地",
+        "对比", "综合", "系统地",
     ];
 
     let multi_action = [
+        "先.*再.*然后", "先.*再.*最后",
         "搜索.*分析", "截图.*分析", "打开.*输入", "读取.*修改",
         "查看.*总结", "下载.*安装",
     ];
@@ -273,11 +284,10 @@ pub fn should_plan(message: &str) -> bool {
     let marker_count = complex_markers.iter().filter(|kw| msg.contains(*kw)).count();
 
     if marker_count >= 2 { return true; }
-    if len > 30 && marker_count >= 1 { return true; }
 
     for pattern in &multi_action {
         let parts: Vec<&str> = pattern.split(".*").collect();
-        if parts.len() == 2 && msg.contains(parts[0]) && msg.contains(parts[1]) {
+        if parts.len() >= 2 && parts.iter().all(|p| msg.contains(p)) {
             return true;
         }
     }
