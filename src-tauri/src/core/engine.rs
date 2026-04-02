@@ -642,6 +642,7 @@ impl AgentEngine {
 
         // Execute
         sink.on_tool_call(step_id, &tc.name, &tc.arguments, "running", stream_id);
+        let tool_start = std::time::Instant::now();
 
         // Route MCP tools to the MCP client manager
         let raw_result = if let Some(ref mcp) = self.mcp_client {
@@ -657,6 +658,8 @@ impl AgentEngine {
             crate::commands::dispatch_tool(tc, &self.file_ops, &self.shell).await
         };
         let result = self.resolve_tool_action(&raw_result).await;
+        let tool_ms = tool_start.elapsed().as_millis() as u64;
+        crate::commands::record_perf_event("tool_call", &tc.name, tool_ms);
 
         // Audit
         if let Some(ref a) = agent_cfg.audit {
@@ -665,7 +668,7 @@ impl AgentEngine {
         }
 
         let result_preview: String = result.chars().take(300).collect();
-        tracing::info!("[Engine] Tool result: {}", result_preview);
+        tracing::info!("[Engine] Tool result ({} ms): {}", tool_ms, result_preview);
         sink.on_tool_result(step_id, &tc.name, &result, "done", stream_id);
         result
     }

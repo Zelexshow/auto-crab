@@ -1241,6 +1241,7 @@ pub fn run() {
             commands::save_to_knowledge_base,
             commands::get_mcp_status,
             commands::get_perf_metrics,
+            commands::query_provider_balances,
         ])
         .setup(|app| {
             let app_handle = app.handle().clone();

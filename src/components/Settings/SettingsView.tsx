@@ -38,10 +38,11 @@ const MODEL_SUGGESTIONS: Record<string, { value: string; label: string }[]> = {
     { value: "qwen2.5-vl-plus", label: "qwen2.5-vl-plus" },
   ],
   deepseek: [
-    { value: "deepseek-chat", label: "deepseek-chat (对话)" },
-    { value: "deepseek-reasoner", label: "deepseek-reasoner (推理)" },
+    { value: "deepseek-chat", label: "deepseek-chat (V3.2 对话)" },
+    { value: "deepseek-reasoner", label: "deepseek-reasoner (R1 推理)" },
   ],
   zhipu: [
+    { value: "glm-5", label: "glm-5 (最新)" },
     { value: "glm-4-plus", label: "glm-4-plus" },
     { value: "glm-4", label: "glm-4" },
   ],
@@ -157,6 +158,21 @@ export function SettingsView() {
   const [configSaving, setConfigSaving] = useState(false);
   const [configSaveMsg, setConfigSaveMsg] = useState("");
   const [credentialStatuses, setCredentialStatuses] = useState<Record<string, boolean>>({});
+
+  // Provider balances
+  const [providerBalances, setProviderBalances] = useState<Record<string, any> | null>(null);
+  const [balanceLoading, setBalanceLoading] = useState(false);
+
+  const fetchBalances = async () => {
+    setBalanceLoading(true);
+    try {
+      const res = await invoke<{ success: boolean; data?: Record<string, any> }>("query_provider_balances");
+      if (res.success && res.data) setProviderBalances(res.data);
+    } catch (e) {
+      console.error("Failed to fetch balances:", e);
+    }
+    setBalanceLoading(false);
+  };
 
   // MCP
   const [mcpClientEnabled, setMcpClientEnabled] = useState(false);
@@ -989,11 +1005,11 @@ export function SettingsView() {
                     const isExpanded = expandedJob === idx;
                     return (
                     <div key={idx} className="rounded-lg" style={{ background: "var(--bg-secondary)", border: "1px solid var(--border)" }}>
-                      <button
-                        className="w-full flex items-center justify-between p-4 text-left"
-                        onClick={() => setExpandedJob(isExpanded ? null : idx)}
-                      >
-                        <div className="flex-1 min-w-0">
+                      <div className="flex items-center p-4 gap-3">
+                        <div
+                          className="flex-1 min-w-0 cursor-pointer"
+                          onClick={() => setExpandedJob(isExpanded ? null : idx)}
+                        >
                           <div className="flex items-center gap-2">
                             <h4 className="text-sm font-medium">{job.name}</h4>
                             {job.skill_ref && (
@@ -1009,8 +1025,19 @@ export function SettingsView() {
                             </p>
                           )}
                         </div>
-                        <ChevronRight size={14} className="shrink-0 ml-2 transition-transform" style={{ transform: isExpanded ? "rotate(90deg)" : "none", color: "var(--text-muted)" }} />
-                      </button>
+                        <div className="flex items-center gap-2 shrink-0" onClick={(e) => e.stopPropagation()}>
+                          <span className="text-[11px]" style={{ color: job.auto_execute ? "var(--success)" : "var(--text-muted)" }}>
+                            {job.auto_execute ? "已启用" : "已禁用"}
+                          </span>
+                          <Toggle on={job.auto_execute} onChange={(v) => { const u = [...schedJobs]; u[idx] = { ...u[idx], auto_execute: v }; setSchedJobs(u); }} />
+                        </div>
+                        <ChevronRight
+                          size={14}
+                          className="shrink-0 cursor-pointer transition-transform"
+                          style={{ transform: isExpanded ? "rotate(90deg)" : "none", color: "var(--text-muted)" }}
+                          onClick={() => setExpandedJob(isExpanded ? null : idx)}
+                        />
+                      </div>
                       {isExpanded && (
                         <div className="px-4 pb-4 space-y-3 border-t" style={{ borderColor: "var(--border)" }}>
                           <div className="pt-3 space-y-3">
@@ -1192,15 +1219,14 @@ export function SettingsView() {
                 const isExpanded = expandedSkill === idx;
                 return (
                 <div key={idx} className="rounded-lg" style={{ background: "var(--bg-secondary)", border: "1px solid var(--border)" }}>
-                  <button
-                    className="w-full flex items-center justify-between p-4 text-left"
-                    onClick={() => setExpandedSkill(isExpanded ? null : idx)}
-                  >
-                    <div className="flex-1 min-w-0">
+                  <div className="flex items-center p-4 gap-3">
+                    <div
+                      className="flex-1 min-w-0 cursor-pointer"
+                      onClick={() => setExpandedSkill(isExpanded ? null : idx)}
+                    >
                       <div className="flex items-center gap-2">
                         <Sparkles size={14} style={{ color: "var(--accent)" }} />
                         <h4 className="text-sm font-medium">{skill.name}</h4>
-                        {skill.always_on && <span className="px-1.5 py-0.5 rounded text-[11px]" style={{ background: "var(--accent)", color: "white", opacity: 0.8 }}>常驻</span>}
                       </div>
                       {!isExpanded && (
                         <p className="text-[13px] mt-1 truncate" style={{ color: "var(--text-muted)" }}>
@@ -1208,8 +1234,19 @@ export function SettingsView() {
                         </p>
                       )}
                     </div>
-                    <ChevronRight size={14} className="shrink-0 ml-2 transition-transform" style={{ transform: isExpanded ? "rotate(90deg)" : "none", color: "var(--text-muted)" }} />
-                  </button>
+                    <div className="flex items-center gap-2 shrink-0" onClick={(e) => e.stopPropagation()}>
+                      <span className="text-[11px]" style={{ color: (skill.always_on ?? false) ? "var(--success)" : "var(--text-muted)" }}>
+                        {(skill.always_on ?? false) ? "常驻" : "按需"}
+                      </span>
+                      <Toggle on={skill.always_on ?? false} onChange={(v) => { const u = [...userSkills]; u[idx] = { ...u[idx], always_on: v }; setUserSkills(u); }} />
+                    </div>
+                    <ChevronRight
+                      size={14}
+                      className="shrink-0 cursor-pointer transition-transform"
+                      style={{ transform: isExpanded ? "rotate(90deg)" : "none", color: "var(--text-muted)" }}
+                      onClick={() => setExpandedSkill(isExpanded ? null : idx)}
+                    />
+                  </div>
                   {isExpanded && (
                     <div className="px-4 pb-4 space-y-3 border-t" style={{ borderColor: "var(--border)" }}>
                       <div className="pt-3 space-y-3">
@@ -1411,6 +1448,66 @@ export function SettingsView() {
           {/* ============ 密钥管理 ============ */}
           {activeTab === "credentials" && (
             <Section title="密钥管理" desc="分类管理所有 API 密钥。系统密钥链中的凭据安全加密存储，搜索 API 密钥保存在配置文件中。">
+              {/* ── 余额与用量 ── */}
+              <Card title="💰 余额与用量" desc="实时查询各服务商的 API 余额和使用量">
+                <div className="flex items-center gap-3 mb-3">
+                  <button
+                    onClick={fetchBalances}
+                    disabled={balanceLoading}
+                    className="flex items-center gap-1.5 px-4 py-1.5 rounded-md text-[13px] text-white transition-colors disabled:opacity-50"
+                    style={{ background: "var(--accent)" }}
+                  >
+                    {balanceLoading ? <Loader2 size={13} className="animate-spin" /> : <ChevronRight size={13} />}
+                    {balanceLoading ? "查询中..." : "查询余额"}
+                  </button>
+                  {providerBalances && !balanceLoading && (
+                    <span className="text-[12px]" style={{ color: "var(--text-muted)" }}>
+                      点击刷新以获取最新数据
+                    </span>
+                  )}
+                </div>
+                {providerBalances && (
+                  <div className="grid grid-cols-2 gap-2.5">
+                    {/* DeepSeek */}
+                    <BalanceCard
+                      name="DeepSeek"
+                      data={providerBalances.deepseek}
+                      type="currency"
+                    />
+                    {/* Moonshot */}
+                    <BalanceCard
+                      name="月之暗面 Kimi"
+                      data={providerBalances.moonshot}
+                      type="currency"
+                    />
+                    {/* Tavily */}
+                    <BalanceCard
+                      name="Tavily"
+                      data={providerBalances.tavily}
+                      type="quota"
+                    />
+                    {/* SerpApi */}
+                    <BalanceCard
+                      name="SerpApi"
+                      data={providerBalances.serpapi}
+                      type="quota"
+                    />
+                    {/* Brave */}
+                    <BalanceCard
+                      name="Brave Search"
+                      data={providerBalances.brave}
+                      type="quota"
+                    />
+                    {/* DashScope */}
+                    <BalanceCard
+                      name="通义千问"
+                      data={providerBalances.dashscope}
+                      type="unavailable"
+                    />
+                  </div>
+                )}
+              </Card>
+
               {/* ── 大模型 API ── */}
               <Card title="🤖 大模型 API" desc="AI 对话所需的 LLM 服务密钥（存储在系统密钥链中）">
                 <div className="space-y-1.5">
@@ -1640,6 +1737,91 @@ function KeyStatus({ provider, statuses }: { provider: string; statuses: Record<
           ? `已配置 ${preview ? `(${preview})` : ""} — keychain://${keyName}`
           : `未配置，请在「密钥管理」中保存 keychain://${keyName}`}
       </span>
+    </div>
+  );
+}
+
+/* ================= BalanceCard Component ================= */
+
+function BalanceCard({ name, data, type }: { name: string; data: any; type: "currency" | "quota" | "unavailable" }) {
+  if (!data) return null;
+
+  const isAvailable = data.available === true;
+  const hasError = !!data.error;
+  const reason = data.reason as string | undefined;
+
+  const statusColor = !isAvailable
+    ? "var(--text-muted)"
+    : type === "currency"
+      ? parseFloat(data.total || "0") > 5 ? "#22c55e" : parseFloat(data.total || "0") > 0 ? "#f59e0b" : "#ef4444"
+      : (data.remaining ?? 0) > 50 ? "#22c55e" : (data.remaining ?? 0) > 10 ? "#f59e0b" : "#ef4444";
+
+  const quotaPct = type === "quota" && isAvailable && data.limit > 0
+    ? Math.round(((data.limit - (data.remaining ?? 0)) / data.limit) * 100)
+    : 0;
+
+  return (
+    <div
+      className="rounded-lg p-3 text-[13px]"
+      style={{ background: "var(--bg-primary)", border: "1px solid var(--border)" }}
+    >
+      <div className="flex items-center justify-between mb-1.5">
+        <span className="font-medium" style={{ color: "var(--text-primary)" }}>{name}</span>
+        <span
+          className="inline-block w-2 h-2 rounded-full"
+          style={{ background: isAvailable ? statusColor : "var(--bg-tertiary)" }}
+        />
+      </div>
+
+      {!isAvailable && !hasError && reason && (
+        <p className="text-[12px]" style={{ color: "var(--text-muted)" }}>{reason}</p>
+      )}
+
+      {hasError && (
+        <p className="text-[12px]" style={{ color: "#ef4444" }}>查询失败: {data.error}</p>
+      )}
+
+      {isAvailable && type === "currency" && (
+        <>
+          <div className="flex items-baseline gap-1">
+            <span className="text-[18px] font-semibold" style={{ color: statusColor }}>{data.total}</span>
+            <span className="text-[12px]" style={{ color: "var(--text-muted)" }}>{data.currency}</span>
+          </div>
+          {data.detail && (
+            <p className="text-[11px] mt-1" style={{ color: "var(--text-muted)" }}>{data.detail}</p>
+          )}
+        </>
+      )}
+
+      {isAvailable && type === "quota" && (
+        <>
+          <div className="flex items-baseline gap-1">
+            <span className="text-[18px] font-semibold" style={{ color: statusColor }}>
+              {data.remaining ?? "?"}
+            </span>
+            <span className="text-[12px]" style={{ color: "var(--text-muted)" }}>
+              / {data.limit} 剩余
+            </span>
+          </div>
+          {data.limit > 0 && (
+            <div className="mt-1.5 h-1.5 rounded-full overflow-hidden" style={{ background: "var(--bg-tertiary)" }}>
+              <div
+                className="h-full rounded-full transition-all"
+                style={{
+                  width: `${quotaPct}%`,
+                  background: quotaPct < 70 ? "#22c55e" : quotaPct < 90 ? "#f59e0b" : "#ef4444",
+                }}
+              />
+            </div>
+          )}
+          {data.plan && (
+            <p className="text-[11px] mt-1" style={{ color: "var(--text-muted)" }}>套餐: {data.plan}</p>
+          )}
+          {data.source === "cached" && data.cached_at && (
+            <p className="text-[11px] mt-0.5" style={{ color: "var(--text-muted)" }}>缓存于 {data.cached_at}</p>
+          )}
+        </>
+      )}
     </div>
   );
 }

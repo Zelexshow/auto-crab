@@ -26,6 +26,16 @@ static SEARCH_CONFIG: std::sync::LazyLock<Mutex<config::SearchConfig>> =
 static SEARCH_USAGE: std::sync::LazyLock<Mutex<HashMap<String, HashMap<String, u32>>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
+/// Cached Brave rate-limit info from response headers
+#[derive(Clone, Serialize)]
+struct BraveRateLimit {
+    remaining: u64,
+    limit: u64,
+    timestamp: String,
+}
+static BRAVE_RATE_LIMIT: std::sync::LazyLock<Mutex<Option<BraveRateLimit>>> =
+    std::sync::LazyLock::new(|| Mutex::new(None));
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct PerfEvent {
     pub event_type: String,
@@ -1107,6 +1117,29 @@ async fn search_brave(query: &str, api_key: &str) -> anyhow::Result<String> {
 
     if !resp.status().is_success() {
         anyhow::bail!("Brave API error: {}", resp.status());
+    }
+
+    if let Some(remaining_hdr) = resp.headers().get("x-ratelimit-remaining") {
+        if let Ok(val) = remaining_hdr.to_str() {
+            let parts: Vec<&str> = val.split(',').map(|s| s.trim()).collect();
+            let v1 = parts.first().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+            let v2 = parts.get(1).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+            let effective_remaining = if v2 > 0 { v2 } else { v1 };
+            let limit_hdr = resp.headers().get("x-ratelimit-limit")
+                .and_then(|h| h.to_str().ok())
+                .unwrap_or("0");
+            let lp: Vec<&str> = limit_hdr.split(',').map(|s| s.trim()).collect();
+            let lv1 = lp.first().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+            let lv2 = lp.get(1).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+            let effective_limit = if lv2 > 0 { lv2 } else { lv1 };
+            if let Ok(mut guard) = BRAVE_RATE_LIMIT.lock() {
+                *guard = Some(BraveRateLimit {
+                    remaining: effective_remaining,
+                    limit: effective_limit,
+                    timestamp: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+                });
+            }
+        }
     }
 
     record_search_usage("brave");
@@ -2324,34 +2357,108 @@ async fn fetch_sina_index(symbol: &str, display: &str) -> anyhow::Result<String>
     ))
 }
 
-/// Fetch index data from Yahoo Finance (tries v8 chart then v6 quote).
+struct YahooCrumb {
+    crumb: String,
+    cookie: String,
+    obtained_at: std::time::Instant,
+}
+
+static YAHOO_CRUMB: std::sync::LazyLock<Mutex<Option<YahooCrumb>>> =
+    std::sync::LazyLock::new(|| Mutex::new(None));
+
+async fn get_yahoo_crumb(client: &reqwest::Client) -> anyhow::Result<(String, String)> {
+    if let Ok(guard) = YAHOO_CRUMB.lock() {
+        if let Some(ref c) = *guard {
+            if c.obtained_at.elapsed() < std::time::Duration::from_secs(1800) {
+                return Ok((c.crumb.clone(), c.cookie.clone()));
+            }
+        }
+    }
+
+    let ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+
+    let resp = client.get("https://fc.yahoo.com/")
+        .header("User-Agent", ua)
+        .send()
+        .await?;
+
+    let cookies: Vec<String> = resp.headers().get_all("set-cookie")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .map(|s| s.split(';').next().unwrap_or("").to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let cookie_str = cookies.join("; ");
+
+    if cookie_str.is_empty() {
+        anyhow::bail!("Yahoo: no cookies from fc.yahoo.com");
+    }
+
+    let crumb_resp = client.get("https://query2.finance.yahoo.com/v1/test/getcrumb")
+        .header("User-Agent", ua)
+        .header("Cookie", &cookie_str)
+        .send()
+        .await?;
+
+    if !crumb_resp.status().is_success() {
+        anyhow::bail!("Yahoo crumb request failed: HTTP {}", crumb_resp.status());
+    }
+    let crumb = crumb_resp.text().await?;
+    if crumb.is_empty() || crumb.contains('<') {
+        anyhow::bail!("Yahoo: invalid crumb response");
+    }
+
+    tracing::info!("[Yahoo] Obtained crumb (len={}), cookies: {} chars", crumb.len(), cookie_str.len());
+
+    if let Ok(mut guard) = YAHOO_CRUMB.lock() {
+        *guard = Some(YahooCrumb {
+            crumb: crumb.clone(),
+            cookie: cookie_str.clone(),
+            obtained_at: std::time::Instant::now(),
+        });
+    }
+
+    Ok((crumb, cookie_str))
+}
+
+/// Fetch index data from Yahoo Finance with crumb auth (tries v8 chart then v6 quote).
 async fn fetch_yahoo_index(yahoo_symbol: &str, display: &str) -> anyhow::Result<String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(12))
         .build()?;
 
-    // Try v8 chart API first
-    if let Ok(result) = fetch_yahoo_v8(&client, yahoo_symbol, display).await {
+    let crumb_result = get_yahoo_crumb(&client).await;
+    let (crumb, cookie) = match crumb_result {
+        Ok(pair) => pair,
+        Err(e) => {
+            tracing::warn!("[Yahoo] Failed to get crumb: {}, trying without auth", e);
+            (String::new(), String::new())
+        }
+    };
+
+    if let Ok(result) = fetch_yahoo_v8(&client, yahoo_symbol, display, &crumb, &cookie).await {
         return Ok(result);
     }
     let label = display;
     tracing::warn!("[Yahoo] v8 chart failed for {}, trying v6 quote", label);
-
-    // Fallback: v6 quote API (different endpoint, often more stable)
-    fetch_yahoo_v6(&client, yahoo_symbol, display).await
+    fetch_yahoo_v6(&client, yahoo_symbol, display, &crumb, &cookie).await
 }
 
-async fn fetch_yahoo_v8(client: &reqwest::Client, yahoo_symbol: &str, display: &str) -> anyhow::Result<String> {
-    let url = format!(
+async fn fetch_yahoo_v8(client: &reqwest::Client, yahoo_symbol: &str, display: &str, crumb: &str, cookie: &str) -> anyhow::Result<String> {
+    let ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+    let mut url = format!(
         "https://query1.finance.yahoo.com/v8/finance/chart/{}?interval=1d&range=1d",
         urlencoding::encode(yahoo_symbol)
     );
+    if !crumb.is_empty() {
+        url.push_str(&format!("&crumb={}", urlencoding::encode(crumb)));
+    }
 
-    let resp = client
-        .get(&url)
-        .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-        .send()
-        .await?;
+    let mut req = client.get(&url).header("User-Agent", ua);
+    if !cookie.is_empty() {
+        req = req.header("Cookie", cookie);
+    }
+    let resp = req.send().await?;
 
     let status = resp.status();
     let body = resp.text().await?;
@@ -2380,17 +2487,21 @@ async fn fetch_yahoo_v8(client: &reqwest::Client, yahoo_symbol: &str, display: &
     format_yahoo_result(current, prev_close, meta["marketState"].as_str().unwrap_or("UNKNOWN"), display)
 }
 
-async fn fetch_yahoo_v6(client: &reqwest::Client, yahoo_symbol: &str, display: &str) -> anyhow::Result<String> {
-    let url = format!(
+async fn fetch_yahoo_v6(client: &reqwest::Client, yahoo_symbol: &str, display: &str, crumb: &str, cookie: &str) -> anyhow::Result<String> {
+    let ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+    let mut url = format!(
         "https://query1.finance.yahoo.com/v6/finance/quote?symbols={}",
         urlencoding::encode(yahoo_symbol)
     );
+    if !crumb.is_empty() {
+        url.push_str(&format!("&crumb={}", urlencoding::encode(crumb)));
+    }
 
-    let resp = client
-        .get(&url)
-        .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-        .send()
-        .await?;
+    let mut req = client.get(&url).header("User-Agent", ua);
+    if !cookie.is_empty() {
+        req = req.header("Cookie", cookie);
+    }
+    let resp = req.send().await?;
 
     let status = resp.status();
     let body = resp.text().await?;
@@ -2524,7 +2635,9 @@ pub async fn chat_stream_start(
     let sid = stream_id.clone();
     let sink = TauriEventSink::new(app);
 
+    let msg_preview: String = message.chars().take(30).collect();
     tokio::spawn(async move {
+        let chat_start = std::time::Instant::now();
         let history_msgs = history_messages_to_chat(&history);
         let full_prompt = crate::build_full_system_prompt(&cfg, Some(&message));
         let messages = build_messages(&full_prompt, &history_msgs, &message);
@@ -2539,6 +2652,7 @@ pub async fn chat_stream_start(
         };
 
         engine.run(messages, &sid, &sink, &agent_cfg).await;
+        record_perf_event("desktop_chat", &msg_preview, chat_start.elapsed().as_millis() as u64);
     });
 
     ApiResult::ok(stream_id)
@@ -2794,28 +2908,286 @@ pub async fn get_mcp_status(
 pub async fn get_perf_metrics() -> ApiResult<serde_json::Value> {
     let events = PERF_EVENTS.lock().ok().map(|g| g.clone()).unwrap_or_default();
     let total = events.len();
-    let chat_events: Vec<&PerfEvent> = events.iter().filter(|e| e.event_type == "remote_chat").collect();
+    let remote_chat: Vec<&PerfEvent> = events.iter().filter(|e| e.event_type == "remote_chat").collect();
+    let desktop_chat: Vec<&PerfEvent> = events.iter().filter(|e| e.event_type == "desktop_chat").collect();
     let enrich_events: Vec<&PerfEvent> = events.iter().filter(|e| e.event_type == "enrich").collect();
     let tool_events: Vec<&PerfEvent> = events.iter().filter(|e| e.event_type == "tool_call").collect();
     let sched_events: Vec<&PerfEvent> = events.iter().filter(|e| e.event_type == "scheduled_task").collect();
 
-    let avg_chat_ms = if chat_events.is_empty() { 0 } else {
-        chat_events.iter().map(|e| e.duration_ms).sum::<u64>() / chat_events.len() as u64
-    };
-    let avg_enrich_ms = if enrich_events.is_empty() { 0 } else {
-        enrich_events.iter().map(|e| e.duration_ms).sum::<u64>() / enrich_events.len() as u64
+    let avg = |evts: &[&PerfEvent]| -> u64 {
+        if evts.is_empty() { 0 } else { evts.iter().map(|e| e.duration_ms).sum::<u64>() / evts.len() as u64 }
     };
 
     ApiResult::ok(serde_json::json!({
         "total_events": total,
         "summary": {
-            "chat_count": chat_events.len(),
-            "chat_avg_ms": avg_chat_ms,
+            "remote_chat_count": remote_chat.len(),
+            "remote_chat_avg_ms": avg(&remote_chat),
+            "desktop_chat_count": desktop_chat.len(),
+            "desktop_chat_avg_ms": avg(&desktop_chat),
             "enrich_count": enrich_events.len(),
-            "enrich_avg_ms": avg_enrich_ms,
+            "enrich_avg_ms": avg(&enrich_events),
             "tool_call_count": tool_events.len(),
+            "tool_call_avg_ms": avg(&tool_events),
             "scheduled_task_count": sched_events.len(),
+            "scheduled_task_avg_ms": avg(&sched_events),
         },
         "recent_events": events.iter().rev().take(50).collect::<Vec<_>>(),
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// Provider balance / usage queries
+// ---------------------------------------------------------------------------
+
+async fn balance_http_get(url: &str, auth_header: Option<(&str, &str)>) -> Result<(u16, String), String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| format!("client build: {}", e))?;
+    let mut req = client.get(url)
+        .header("Accept", "application/json")
+        .header("User-Agent", "AutoCrab/1.0");
+    if let Some((key, value)) = auth_header {
+        req = req.header(key, value);
+    }
+    let resp = req.send().await.map_err(|e| {
+        let msg = format!("网络请求失败: {}", e);
+        tracing::error!("[Balance] GET {} => {}", url, msg);
+        msg
+    })?;
+    let status = resp.status().as_u16();
+    let body = resp.text().await.map_err(|e| format!("读取响应失败: {}", e))?;
+    if status >= 400 {
+        tracing::error!("[Balance] GET {} => HTTP {} body: {}", url, status, &body[..body.len().min(300)]);
+    } else {
+        tracing::info!("[Balance] GET {} => HTTP {} len={}", url, status, body.len());
+    }
+    Ok((status, body))
+}
+
+async fn query_deepseek_balance(api_key: &str) -> serde_json::Value {
+    let auth = format!("Bearer {}", api_key);
+    match balance_http_get(
+        "https://api.deepseek.com/user/balance",
+        Some(("Authorization", &auth)),
+    ).await {
+        Ok((status, body)) if status < 400 => {
+            match serde_json::from_str::<serde_json::Value>(&body) {
+                Ok(data) => {
+                    if let Some(infos) = data["balance_infos"].as_array() {
+                        if let Some(info) = infos.first() {
+                            let total = info["total_balance"].as_str().unwrap_or("0");
+                            let granted = info["granted_balance"].as_str().unwrap_or("0");
+                            let topped = info["topped_up_balance"].as_str().unwrap_or("0");
+                            let currency = info["currency"].as_str().unwrap_or("CNY");
+                            return serde_json::json!({
+                                "available": data["is_available"].as_bool().unwrap_or(false),
+                                "total": total,
+                                "currency": currency,
+                                "detail": format!("赠金 {} + 充值 {}", granted, topped),
+                            });
+                        }
+                    }
+                    tracing::warn!("[Balance] DeepSeek unexpected JSON: {}", &body[..body.len().min(200)]);
+                    serde_json::json!({ "available": false, "error": "响应格式异常" })
+                }
+                Err(e) => {
+                    tracing::error!("[Balance] DeepSeek JSON parse error: {}, body: {}", e, &body[..body.len().min(200)]);
+                    serde_json::json!({ "available": false, "error": format!("JSON解析失败: {}", e) })
+                }
+            }
+        }
+        Ok((status, body)) => serde_json::json!({ "available": false, "error": format!("HTTP {} - {}", status, &body[..body.len().min(100)]) }),
+        Err(e) => serde_json::json!({ "available": false, "error": e }),
+    }
+}
+
+async fn query_moonshot_balance(api_key: &str) -> serde_json::Value {
+    let auth = format!("Bearer {}", api_key);
+    match balance_http_get(
+        "https://api.moonshot.cn/v1/users/me/balance",
+        Some(("Authorization", &auth)),
+    ).await {
+        Ok((status, body)) if status < 400 => {
+            match serde_json::from_str::<serde_json::Value>(&body) {
+                Ok(data) => {
+                    if data["status"].as_bool() == Some(true) || data["code"].as_i64() == Some(0) {
+                        let d = &data["data"];
+                        let available = d["available_balance"].as_f64().unwrap_or(0.0);
+                        let voucher = d["voucher_balance"].as_f64().unwrap_or(0.0);
+                        let cash = d["cash_balance"].as_f64().unwrap_or(0.0);
+                        return serde_json::json!({
+                            "available": available > 0.0,
+                            "total": format!("{:.2}", available),
+                            "currency": "CNY",
+                            "detail": format!("现金 {:.2} + 代金券 {:.2}", cash, voucher),
+                        });
+                    }
+                    tracing::warn!("[Balance] Moonshot unexpected JSON: {}", &body[..body.len().min(200)]);
+                    serde_json::json!({ "available": false, "error": "响应格式异常" })
+                }
+                Err(e) => serde_json::json!({ "available": false, "error": format!("JSON解析失败: {}", e) }),
+            }
+        }
+        Ok((status, body)) => serde_json::json!({ "available": false, "error": format!("HTTP {} - {}", status, &body[..body.len().min(100)]) }),
+        Err(e) => serde_json::json!({ "available": false, "error": e }),
+    }
+}
+
+async fn query_tavily_usage(api_key: &str) -> serde_json::Value {
+    let auth = format!("Bearer {}", api_key);
+    match balance_http_get(
+        "https://api.tavily.com/usage",
+        Some(("Authorization", &auth)),
+    ).await {
+        Ok((status, body)) if status < 400 => {
+            match serde_json::from_str::<serde_json::Value>(&body) {
+                Ok(data) => {
+                    let used = data["key"]["usage"].as_u64().unwrap_or(0);
+                    let limit = data["key"]["limit"].as_u64();
+                    let plan = data["account"]["current_plan"].as_str().unwrap_or("Unknown");
+                    let plan_limit = data["account"]["plan_limit"].as_u64();
+                    let effective_limit = limit.or(plan_limit).unwrap_or(1000);
+                    serde_json::json!({
+                        "available": true,
+                        "used": used,
+                        "limit": effective_limit,
+                        "remaining": effective_limit.saturating_sub(used),
+                        "plan": plan,
+                    })
+                }
+                Err(e) => serde_json::json!({ "available": false, "error": format!("JSON解析失败: {}", e) }),
+            }
+        }
+        Ok((status, body)) => serde_json::json!({ "available": false, "error": format!("HTTP {} - {}", status, &body[..body.len().min(100)]) }),
+        Err(e) => serde_json::json!({ "available": false, "error": e }),
+    }
+}
+
+async fn query_serpapi_usage(api_key: &str) -> serde_json::Value {
+    let url = format!("https://serpapi.com/account.json?api_key={}", api_key);
+    match balance_http_get(&url, None).await {
+        Ok((status, body)) if status < 400 => {
+            match serde_json::from_str::<serde_json::Value>(&body) {
+                Ok(data) => {
+                    let total = data["searches_per_month"].as_u64().unwrap_or(0);
+                    let left = data["total_searches_left"].as_u64().unwrap_or(0);
+                    let used = data["this_month_usage"].as_u64().unwrap_or(0);
+                    let plan = data["plan_name"].as_str().unwrap_or("Unknown");
+                    serde_json::json!({
+                        "available": true,
+                        "used": used,
+                        "limit": total,
+                        "remaining": left,
+                        "plan": plan,
+                    })
+                }
+                Err(e) => serde_json::json!({ "available": false, "error": format!("JSON解析失败: {}", e) }),
+            }
+        }
+        Ok((status, body)) => serde_json::json!({ "available": false, "error": format!("HTTP {} - {}", status, &body[..body.len().min(100)]) }),
+        Err(e) => serde_json::json!({ "available": false, "error": e }),
+    }
+}
+
+fn query_brave_cached() -> serde_json::Value {
+    if let Ok(guard) = BRAVE_RATE_LIMIT.lock() {
+        if let Some(ref info) = *guard {
+            return serde_json::json!({
+                "available": true,
+                "remaining": info.remaining,
+                "limit": info.limit,
+                "is_per_second": true,
+                "plan": format!("每秒容量 {} req/s · 按量计费 · 数据来自最近一次搜索", info.limit),
+                "source": "cached",
+                "cached_at": info.timestamp,
+            });
+        }
+    }
+    serde_json::json!({ "available": false, "reason": "暂无数据，将在下次搜索调用后自动更新" })
+}
+
+#[tauri::command]
+pub async fn query_provider_balances(app: AppHandle) -> ApiResult<serde_json::Value> {
+    let resolve_key = |name: &str| -> Option<String> {
+        CredentialStore::retrieve(name).ok().filter(|s| !s.is_empty())
+    };
+
+    let cfg = match config::load_config(&app).await {
+        Ok(c) => c,
+        Err(e) => return ApiResult::err(format!("Config error: {}", e)),
+    };
+
+    let search_cfg = SEARCH_CONFIG.lock().map(|g| g.clone()).unwrap_or_default();
+
+    let deepseek_key = resolve_key("deepseek");
+    let moonshot_key = resolve_key("moonshot");
+
+    let tavily_key = if !search_cfg.tavily_api_key.is_empty() {
+        Some(search_cfg.tavily_api_key.clone())
+    } else {
+        None
+    };
+    let serpapi_key = if !search_cfg.serpapi_api_key.is_empty() {
+        Some(search_cfg.serpapi_api_key.clone())
+    } else {
+        None
+    };
+
+    tracing::info!(
+        "[Balance] Querying balances: deepseek={}, moonshot={}, tavily={}, serpapi={}, brave={}",
+        deepseek_key.is_some(), moonshot_key.is_some(),
+        tavily_key.is_some(), serpapi_key.is_some(),
+        !search_cfg.brave_api_key.is_empty()
+    );
+
+    let (deepseek_result, moonshot_result, tavily_result, serpapi_result) = tokio::join!(
+        async {
+            match &deepseek_key {
+                Some(k) => query_deepseek_balance(k).await,
+                None => serde_json::json!({ "available": false, "reason": "未配置" }),
+            }
+        },
+        async {
+            match &moonshot_key {
+                Some(k) => query_moonshot_balance(k).await,
+                None => serde_json::json!({ "available": false, "reason": "未配置" }),
+            }
+        },
+        async {
+            match &tavily_key {
+                Some(k) => query_tavily_usage(k).await,
+                None => serde_json::json!({ "available": false, "reason": "未配置" }),
+            }
+        },
+        async {
+            match &serpapi_key {
+                Some(k) => query_serpapi_usage(k).await,
+                None => serde_json::json!({ "available": false, "reason": "未配置" }),
+            }
+        },
+    );
+
+    let brave_result = if !search_cfg.brave_api_key.is_empty() {
+        query_brave_cached()
+    } else {
+        serde_json::json!({ "available": false, "reason": "未配置" })
+    };
+
+    let _primary_provider = cfg.models.primary.as_ref().map(|m| m.provider.as_str()).unwrap_or("");
+
+    ApiResult::ok(serde_json::json!({
+        "deepseek": deepseek_result,
+        "moonshot": moonshot_result,
+        "tavily": tavily_result,
+        "serpapi": serpapi_result,
+        "brave": brave_result,
+        "dashscope": { "available": false, "reason": "暂不支持API查询，请在阿里云控制台查看" },
+        "dashscope_vl": { "available": false, "reason": "暂不支持API查询，请在阿里云控制台查看" },
+        "zhipu": { "available": false, "reason": "暂不支持API查询，请在智谱控制台查看" },
+        "openai": { "available": false, "reason": "需要管理员密钥，请在 OpenAI 控制台查看" },
+        "anthropic": { "available": false, "reason": "需要管理员密钥，请在 Anthropic 控制台查看" },
+        "ollama": { "available": false, "reason": "本地模型，无余额概念" },
     }))
 }
