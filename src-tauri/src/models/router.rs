@@ -102,6 +102,10 @@ impl ModelRouter {
                 &api_key,
                 &entry.model,
             ))),
+            "gemini" => Ok(Box::new(OpenAICompatProvider::gemini(
+                &api_key,
+                &entry.model,
+            ))),
             "ollama" => {
                 let endpoint = entry
                     .endpoint

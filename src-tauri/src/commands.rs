@@ -709,10 +709,17 @@ pub async fn dispatch_tool(tc: &ToolCall, file_ops: &FileOps, shell: &ShellExecu
                 .unwrap_or_else(|_| ".".into());
             let tmp_path = format!("{}\\AppData\\Local\\Temp\\auto-crab-screen.png", data_dir);
             let question = args["question"].as_str().unwrap_or("请详细描述截图中的内容");
+            let (screen_w, screen_h) = tokio::task::spawn_blocking(|| {
+                xcap::Monitor::all()
+                    .ok()
+                    .and_then(|m| m.into_iter().next())
+                    .map(|m| (m.width(), m.height()))
+                    .unwrap_or((1920, 1080))
+            })
+            .await
+            .unwrap_or((1920, 1080));
             match take_screenshot(&tmp_path).await {
                 Ok(path) => {
-                    let screen_w = 2560;
-                    let screen_h = 1440;
                     let prompt = format!(
                         "{}\n\n屏幕实际分辨率: {}x{}。截图已按比例缩小，请根据原始分辨率换算坐标。\
 如果你看到需要点击的UI元素，请输出其在 {}x{} 屏幕上的坐标，格式: CLICK_TARGET: (x, y) 元素名称。\
@@ -762,86 +769,61 @@ pub async fn analyze_screenshot(
     analyze_screenshot_with_prompt(cfg, image_path, "请详细描述这张截图中的内容。如果是聊天软件，请列出可见的消息内容和发送者。如果是网页，请总结页面内容。如果是代码编辑器，请描述代码内容。").await
 }
 
+/// Analyze a screenshot using the configured vision model.
+/// Uses the standard ModelProvider::chat() pipeline, so any provider that
+/// supports multimodal content (image_url) works automatically — no need
+/// to add provider-specific HTTP logic here.
 pub async fn analyze_screenshot_with_prompt(
     cfg: &config::AppConfig,
     image_path: &str,
     prompt: &str,
 ) -> anyhow::Result<String> {
-    let vl_entry = cfg
-        .models
-        .vision
-        .as_ref()
-        .or_else(|| {
-            cfg.models
-                .coding
-                .as_ref()
-                .filter(|e| e.provider == "dashscope_vl")
-        })
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "未配置视觉模型。请在 [models.vision] 中设置 provider = \"dashscope_vl\""
-            )
-        })?;
+    use crate::models::provider::*;
+    use crate::models::ModelRouter;
 
-    let api_key = crate::security::credentials::CredentialStore::resolve_ref(
-        vl_entry.api_key_ref.as_deref().unwrap_or(""),
-    )?;
+    let router = ModelRouter::from_config(cfg)?;
 
+    let provider = router
+        .get_provider("vision")
+        .or_else(|| router.get_primary())
+        .ok_or_else(|| anyhow::anyhow!("未配置视觉模型，也没有主模型可用。请在 [models.vision] 或 [models.primary] 中配置"))?;
+
+    let pi = provider.info();
     let path_clone = image_path.to_string();
     let jpeg_data =
         tokio::task::spawn_blocking(move || compress_image_for_vl(&path_clone)).await??;
-
     let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &jpeg_data);
-    tracing::info!("VL input base64 length: {} chars", b64.len());
+    tracing::info!("[VL] Using {} ({}) — base64 length: {} chars", pi.display_name, pi.name, b64.len());
 
-    let body = serde_json::json!({
-        "model": vl_entry.model,
-        "messages": [{
-            "role": "user",
-            "content": [
-                {"type": "image_url", "image_url": {"url": format!("data:image/jpeg;base64,{}", b64)}},
-                {"type": "text", "text": prompt}
-            ]
+    let multimodal_content = serde_json::json!([
+        {"type": "image_url", "image_url": {"url": format!("data:image/jpeg;base64,{}", b64)}},
+        {"type": "text", "text": prompt}
+    ]);
+
+    let request = ChatRequest {
+        messages: vec![ChatMessage {
+            role: MessageRole::User,
+            content: multimodal_content.to_string(),
+            name: None,
+            tool_calls: None,
+            tool_call_id: None,
         }],
-        "max_tokens": 2000,
-        "temperature": 0.3
-    });
-
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(60))
-        .build()?;
+        tools: None,
+        temperature: 0.3,
+        max_tokens: Some(2000),
+    };
 
     let mut last_err = String::new();
     for attempt in 0..3 {
         if attempt > 0 {
-            tracing::info!("VL API retry attempt {}", attempt + 1);
+            tracing::info!("[VL] Retry attempt {}", attempt + 1);
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         }
-        match client
-            .post("https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions")
-            .header("Authorization", format!("Bearer {}", api_key))
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
-            .await
-        {
-            Ok(resp) => {
-                if !resp.status().is_success() {
-                    let status = resp.status();
-                    let err_body = resp.text().await.unwrap_or_default();
-                    last_err = format!("VL API error {}: {}", status, err_body);
-                    continue;
-                }
-                let api_resp: serde_json::Value = resp.json().await?;
-                let content = api_resp["choices"][0]["message"]["content"]
-                    .as_str()
-                    .unwrap_or("视觉模型未返回内容")
-                    .to_string();
-                return Ok(content);
-            }
+        match provider.chat(request.clone()).await {
+            Ok(resp) => return Ok(resp.message.content),
             Err(e) => {
-                last_err = format!("网络错误: {}", e);
-                continue;
+                last_err = e.to_string();
+                tracing::warn!("[VL] Attempt {} failed: {}", attempt + 1, &last_err[..last_err.len().min(200)]);
             }
         }
     }
@@ -1487,6 +1469,16 @@ pub async fn execute_analyze_and_act(
     let tmp_dir = std::env::var("USERPROFILE").unwrap_or_else(|_| ".".into());
     let mut results = Vec::new();
 
+    let (sw, sh) = tokio::task::spawn_blocking(|| {
+        xcap::Monitor::all()
+            .ok()
+            .and_then(|m| m.into_iter().next())
+            .map(|m| (m.width(), m.height()))
+            .unwrap_or((1920, 1080))
+    })
+    .await
+    .unwrap_or((1920, 1080));
+
     for step in 0..max_steps {
         let tmp_path = format!("{}\\AppData\\Local\\Temp\\auto-crab-act-{}.png", tmp_dir, step);
 
@@ -1499,7 +1491,7 @@ pub async fn execute_analyze_and_act(
         let vl_prompt = format!(
 r#"你是桌面操作助理。分析截图，在目标应用窗口中执行操作。
 用户任务：{}
-屏幕分辨率：2560x1440（截图已缩小，请按原始分辨率换算坐标）
+屏幕分辨率：{}x{}（截图已缩小，请按原始分辨率换算坐标）
 
 重要规则：
 - 只检查目标应用窗口的实际状态，忽略聊天窗口/终端中的文字
@@ -1510,7 +1502,7 @@ r#"你是桌面操作助理。分析截图，在目标应用窗口中执行操�
 {{"screen_description":"目标应用窗口状态","task_status":"need_action 或 completed 或 impossible","actions":[{{"type":"click 或 type 或 key_press","x":数字,"y":数字,"text":"字符串","key":"字符串","reason":"原因"}}]}}
 
 click需要x,y; type需要text; key_press需要key。任务真正完成时actions返回空数组。"#,
-            task
+            task, sw, sh
         );
 
         match analyze_screenshot_with_prompt(cfg, &tmp_path, &vl_prompt).await {
@@ -1557,8 +1549,9 @@ click需要x,y; type需要text; key_press需要key。任务真正完成时action
                         }
                     }
                     VlActionResult::ParseError(raw) => {
-                        results.push(format!("步骤{}: VL返回无法解析，原始内容: {}", step + 1, raw.chars().take(200).collect::<String>()));
-                        break;
+                        let preview: String = raw.chars().take(300).collect();
+                        tracing::warn!("[VL] Step {} parse failed, will retry. Raw: {}", step + 1, preview);
+                        results.push(format!("步骤{}: VL返回格式异常，重试中...", step + 1));
                     }
                 }
             }
@@ -1591,17 +1584,41 @@ enum VlActionResult {
     ParseError(String),
 }
 
-fn parse_vl_actions(response: &str) -> VlActionResult {
-    let json_str = response.trim();
-    let json_str = if let Some(start) = json_str.find('{') {
-        if let Some(end) = json_str.rfind('}') {
-            &json_str[start..=end]
-        } else { json_str }
-    } else { json_str };
+/// Fix malformed JSON from VL models.
+/// Qwen3-VL-Plus consistently outputs `"x": 412, 798` instead of `"x": 412, "y": 798`.
+fn fix_vl_json(input: &str) -> String {
+    let re = regex::Regex::new(r#""x"\s*:\s*(\d+)\s*,\s*(\d+)"#).unwrap();
+    let mut s = re.replace_all(input, r#""x": $1, "y": $2"#).to_string();
+    s = s.replace(",]", "]");
+    s = s.replace(",}", "}");
+    s
+}
 
-    let parsed: serde_json::Value = match serde_json::from_str(json_str) {
+fn parse_vl_actions(response: &str) -> VlActionResult {
+    let raw = response.trim();
+    // Strip markdown code fences (```json ... ``` or ``` ... ```)
+    let stripped = if raw.contains("```") {
+        let s = raw.replace("```json", "").replace("```JSON", "").replace("```", "");
+        s.trim().to_string()
+    } else {
+        raw.to_string()
+    };
+
+    // Extract the outermost JSON object
+    let json_str = if let Some(start) = stripped.find('{') {
+        if let Some(end) = stripped.rfind('}') {
+            &stripped[start..=end]
+        } else { stripped.as_str() }
+    } else { stripped.as_str() };
+
+    // Fix common VL JSON issues before parsing
+    let fixed = fix_vl_json(json_str);
+    let parsed: serde_json::Value = match serde_json::from_str(&fixed) {
         Ok(v) => v,
-        Err(_) => return VlActionResult::ParseError(response.to_string()),
+        Err(e) => {
+            tracing::warn!("[VL Parse] JSON parse failed after fixes: {}. Fixed (first 500 chars): {}", e, &fixed.chars().take(500).collect::<String>());
+            return VlActionResult::ParseError(response.to_string());
+        }
     };
 
     let desc = parsed["screen_description"].as_str().unwrap_or("").to_string();
@@ -2618,18 +2635,43 @@ pub async fn chat_stream_start(
     app: AppHandle,
     message: String,
     history: Vec<HistoryMessage>,
+    model_override: Option<String>,
 ) -> ApiResult<String> {
     use crate::core::engine::*;
 
-    let cfg = match config::load_config(&app).await {
+    let mut cfg = match config::load_config(&app).await {
         Ok(c) => c,
         Err(e) => return ApiResult::err(format!("Config error: {}", e)),
     };
 
-    let engine = match AgentEngine::from_config(&cfg) {
+    // If the chat UI selected a different provider, override the primary model
+    if let Some(ref provider) = model_override {
+        if !provider.is_empty() {
+            if let Some(ref mut primary) = cfg.models.primary {
+                if primary.provider != *provider {
+                    tracing::info!("[Desktop] Model override: {} -> {}", primary.provider, provider);
+                    primary.provider = provider.clone();
+                }
+            }
+        }
+    }
+
+    let mut engine = match AgentEngine::from_config(&cfg) {
         Ok(e) => e,
         Err(e) => return ApiResult::err(format!("Engine error: {}", e)),
     };
+
+    // Wire MCP client from Tauri state (initialized in lib.rs setup)
+    if let Some(mcp) = app.try_state::<std::sync::Arc<crate::mcp::client::McpClientManager>>() {
+        engine = engine.with_mcp_client(mcp.inner().clone());
+        engine.refresh_tool_defs().await;
+    }
+
+    // Wire audit logger from Tauri state
+    let audit = app.try_state::<std::sync::Arc<crate::security::audit::AuditLogger>>()
+        .map(|s| s.inner().clone());
+
+    let memory = crate::create_memory(&cfg);
 
     let stream_id = Uuid::new_v4().to_string();
     let sid = stream_id.clone();
@@ -2645,9 +2687,9 @@ pub async fn chat_stream_start(
         let agent_cfg = AgentConfig {
             max_rounds: 8,
             tools_enabled: cfg.tools.shell_enabled,
-            audit: None,
+            audit,
             audit_source: crate::security::audit::AuditSource::Local,
-            memory: None,
+            memory,
             planning_enabled: true,
         };
 
@@ -3108,8 +3150,20 @@ fn query_brave_cached() -> serde_json::Value {
     serde_json::json!({ "available": false, "reason": "暂无数据，将在下次搜索调用后自动更新" })
 }
 
+static BALANCE_CACHE: std::sync::LazyLock<Mutex<Option<(serde_json::Value, std::time::Instant)>>> =
+    std::sync::LazyLock::new(|| Mutex::new(None));
+
 #[tauri::command]
 pub async fn query_provider_balances(app: AppHandle) -> ApiResult<serde_json::Value> {
+    if let Ok(guard) = BALANCE_CACHE.lock() {
+        if let Some((ref cached, ref ts)) = *guard {
+            if ts.elapsed() < std::time::Duration::from_secs(60) {
+                tracing::info!("[Balance] Returning cached result (age={}s)", ts.elapsed().as_secs());
+                return ApiResult::ok(cached.clone());
+            }
+        }
+    }
+
     let resolve_key = |name: &str| -> Option<String> {
         CredentialStore::retrieve(name).ok().filter(|s| !s.is_empty())
     };
@@ -3177,7 +3231,7 @@ pub async fn query_provider_balances(app: AppHandle) -> ApiResult<serde_json::Va
 
     let _primary_provider = cfg.models.primary.as_ref().map(|m| m.provider.as_str()).unwrap_or("");
 
-    ApiResult::ok(serde_json::json!({
+    let result = serde_json::json!({
         "deepseek": deepseek_result,
         "moonshot": moonshot_result,
         "tavily": tavily_result,
@@ -3189,5 +3243,11 @@ pub async fn query_provider_balances(app: AppHandle) -> ApiResult<serde_json::Va
         "openai": { "available": false, "reason": "需要管理员密钥，请在 OpenAI 控制台查看" },
         "anthropic": { "available": false, "reason": "需要管理员密钥，请在 Anthropic 控制台查看" },
         "ollama": { "available": false, "reason": "本地模型，无余额概念" },
-    }))
+    });
+
+    if let Ok(mut guard) = BALANCE_CACHE.lock() {
+        *guard = Some((result.clone(), std::time::Instant::now()));
+    }
+
+    ApiResult::ok(result)
 }

@@ -1545,6 +1545,316 @@ graph TB
 | 性能监控持久化 | ✅ 已完成 | `perf-events.jsonl` JSONL 落盘 + 启动加载，重启不丢数据 |
 | 统一数据目录 | ✅ 已完成 | 所有模块（审计、记忆、快照、性能）统一使用 Tauri `app_data_dir` |
 
+---
+
+## 桌面控制能力：原理与实现
+
+### 核心原理：截图-分析-操作循环
+
+无论是 Claude Computer Use、OpenAI Operator 还是 Auto-Crab，桌面控制的底层原理都是同一个循环：
+
+```mermaid
+graph LR
+    A["截图<br/>xcap / pyautogui"] --> B["发给视觉模型<br/>分析屏幕内容"]
+    B --> C["模型返回操作指令<br/>click(x,y) / type(text) / key(enter)"]
+    C --> D["执行鼠标键盘操作<br/>enigo / pyautogui"]
+    D --> A
+
+    style B fill:#9B59B6,stroke:#333,color:#fff
+```
+
+**模型不直接连接电脑。** 所有操作都是：你的代码截图 → 发给模型分析 → 模型告诉你"点这里"或"输入这个" → 你的代码执行操作 → 再截图确认。
+
+### Auto-Crab 的三层控制能力
+
+```mermaid
+graph TB
+    subgraph "第一层：手 — 底层系统操作（全部可用）"
+        H1["mouse_click<br/>enigo 鼠标点击"]
+        H2["keyboard_type<br/>enigo 键盘输入"]
+        H3["key_press<br/>enigo 组合键"]
+        H4["focus_window<br/>Win32 窗口聚焦"]
+        H5["screenshot<br/>xcap 截图"]
+        H6["execute_shell<br/>命令执行"]
+    end
+
+    subgraph "第二层：眼 — 视觉分析（需 VL 模型）"
+        E1["analyze_screen<br/>截图 → VL 模型描述屏幕内容"]
+        E2["analyze_and_act<br/>截图 → VL 返回操作指令 JSON → 执行"]
+    end
+
+    subgraph "第三层：脑 — 智能流程编排"
+        B1["AgentEngine<br/>ReAct 循环：推理→工具→观察"]
+        B2["resolve_tool_action<br/>工具结果后处理"]
+        B3["execute_wechat_reply<br/>微信专用快捷键流程"]
+    end
+
+    B1 --> B2
+    B2 --> E2
+    B2 --> B3
+    E2 --> H1 & H2 & H3
+    B3 --> H2 & H3 & H4
+    E1 --> H5
+
+    style H1 fill:#27AE60,stroke:#333,color:#fff
+    style H2 fill:#27AE60,stroke:#333,color:#fff
+    style H3 fill:#27AE60,stroke:#333,color:#fff
+    style E1 fill:#F39C12,stroke:#333,color:#000
+    style E2 fill:#F39C12,stroke:#333,color:#000
+    style B1 fill:#3498DB,stroke:#333,color:#fff
+    style B3 fill:#3498DB,stroke:#333,color:#fff
+```
+
+### 两种操控模式
+
+实践中，桌面控制有两种技术路径，适用于不同场景：
+
+#### 模式一：视觉驱动（通用但精度受限）
+
+适用于无法预知 UI 布局的场景，如浏览网页、操作陌生软件。
+
+```mermaid
+sequenceDiagram
+    participant A as Agent
+    participant S as 截图 (xcap)
+    participant VL as 视觉模型 (Qwen VL)
+    participant D as 桌面 (enigo)
+
+    loop 每一步 (最多 N 步)
+        A->>S: 截取当前屏幕
+        S-->>VL: 发送截图 + 任务描述
+        VL-->>A: 返回 JSON 指令
+        Note over VL,A: {"actions": [<br/>  {"type":"click","x":412,"y":798},<br/>  {"type":"type","text":"你好"},<br/>  {"type":"key_press","key":"enter"}<br/>]}
+        A->>D: 执行操作
+        Note over A: 等待 UI 响应后再截图
+    end
+```
+
+**优点：** 通用性强，任何软件都能操作
+**缺点：** 依赖 VL 模型坐标精度，分辨率缩放可能导致坐标偏差
+
+实现位置：`commands::execute_analyze_and_act()`
+
+##### VL JSON 修复机制
+
+Qwen3-VL-Plus 模型返回坐标时有固定的格式问题（`"x": 412, 798` 而非 `"x": 412, "y": 798`），`fix_vl_json()` 在解析前自动修正：
+
+```
+修正前: {"type": "click", "x": 412, 798, "reason": "..."}
+修正后: {"type": "click", "x": 412, "y": 798, "reason": "..."}
+```
+
+同时处理 markdown 代码块包裹、尾逗号等常见格式问题，解析失败时重试而非终止。
+
+#### 模式二：快捷键驱动（高可靠但需预设）
+
+适用于操作流程固定的高频场景，如微信回复、打开应用。
+
+```mermaid
+sequenceDiagram
+    participant A as Agent
+    participant W as 微信窗口
+
+    A->>W: focus_window("微信")
+    Note over W: SetForegroundWindow
+
+    A->>W: key_press("ctrl+f")
+    Note over W: 打开搜索框
+
+    A->>W: keyboard_type("妹妹")
+    Note over W: 搜索联系人
+
+    A->>W: key_press("enter")
+    Note over W: 选择第一个搜索结果<br/>进入聊天，输入框自动聚焦
+
+    A->>W: keyboard_type("泪目啊")
+    Note over W: 输入消息内容
+
+    A->>W: key_press("enter")
+    Note over W: 发送消息
+
+    A->>W: key_press("escape")
+    Note over W: 关闭搜索面板
+```
+
+**优点：** 确定性高，不依赖坐标，不会发错人
+**缺点：** 需要为每个软件预设快捷键流程
+
+实现位置：`core::engine::AgentEngine::execute_wechat_reply()`
+
+#### 两种模式的对比与选择
+
+| 维度 | 视觉驱动 | 快捷键驱动 |
+|------|---------|-----------|
+| 通用性 | ⭐⭐⭐⭐⭐ 任何软件 | ⭐⭐ 需预设 |
+| 可靠性 | ⭐⭐ 坐标可能偏 | ⭐⭐⭐⭐⭐ 确定性操作 |
+| 速度 | ⭐⭐ 每步需截图+VL分析 | ⭐⭐⭐⭐⭐ 直接执行 |
+| 成本 | ⭐⭐ 每步消耗 VL token | ⭐⭐⭐⭐⭐ 零 API 调用 |
+| 适用场景 | 浏览器、陌生软件 | 微信、飞书等高频固定操作 |
+
+**最佳实践：** 高频操作（微信回复）用快捷键驱动，低频/探索性操作（浏览网页）用视觉驱动。
+
+### 快捷键驱动的跨软件适配
+
+快捷键流程的核心思路（搜索→选择→输入→发送）可推广到其他 IM 软件：
+
+| 软件 | 搜索快捷键 | 选择结果 | 输入发送 | 适配难度 |
+|------|-----------|---------|---------|---------|
+| **微信** | `Ctrl+F` | `Enter` 选第一个 | 输入框自动聚焦，`Enter` 发送 | ✅ 已实现 |
+| **飞书** | `Ctrl+K` | `Enter` | 同上 | 改快捷键即可 |
+| **钉钉** | `Ctrl+F` | `Enter` | 同上 | 基本适用 |
+| **Telegram** | 直接在搜索栏输入 | `Enter` | 同上 | 需适配 |
+| **Slack** | `Ctrl+K` | `Enter` | 同上 | 改快捷键即可 |
+
+扩展方式：在配置中为每个软件定义搜索快捷键和发送快捷键，`execute_wechat_reply` 泛化为 `execute_im_reply(app, contact, message)`。
+
+### 与业界方案的对比
+
+```mermaid
+graph LR
+    subgraph "Claude Computer Use"
+        C1["Claude Opus 4.6<br/>专门训练 GUI 理解<br/>坐标精度极高"]
+        C2["你的代码执行操作"]
+    end
+
+    subgraph "OpenAI Operator"
+        O1["GPT-5.4 CUA<br/>RL 强化学习训练<br/>GUI 交互专项"]
+        O2["沙箱浏览器执行"]
+    end
+
+    subgraph "Auto-Crab"
+        A1["Qwen3-VL-Plus<br/>通用视觉模型<br/>坐标精度中等"]
+        A2["enigo 本地执行"]
+        A3["快捷键模式兜底<br/>高频场景确定性操作"]
+    end
+
+    style C1 fill:#9B59B6,stroke:#333,color:#fff
+    style O1 fill:#27AE60,stroke:#333,color:#fff
+    style A1 fill:#F39C12,stroke:#333,color:#000
+    style A3 fill:#3498DB,stroke:#333,color:#fff
+```
+
+| | Claude Computer Use | OpenAI Operator | Auto-Crab |
+|---|---|---|---|
+| 视觉模型 | Opus 4.6（GUI 专项训练） | GPT-5.4 CUA（RL 训练） | Qwen3-VL-Plus（通用 VL） |
+| 坐标精度 | 极高 (< 5px 误差) | 极高 | 中等（需 fix_vl_json 修正） |
+| 操作执行 | 用户侧代码 | 云端沙箱 | 本地 enigo |
+| 兜底方案 | 无（纯视觉） | 无（纯视觉） | 快捷键模式（确定性） |
+| 成本 | $5/$25 per M tokens | ChatGPT Pro 订阅 | $0.14/$0.41 per M tokens |
+| 优势 | 精度最高 | 开箱即用 | 成本低 + 快捷键兜底 |
+
+> **Auto-Crab 的独特优势：** 虽然视觉模型精度不如 Claude/GPT，但通过快捷键驱动模式兜底高频操作，实际使用体验接近，成本低一个数量级。
+
+---
+
+---
+
+## 多模型接入与视觉分析的统一管道
+
+### 新增模型的标准流程
+
+新增任何 OpenAI 兼容的模型 Provider 只需改三处，视觉分析自动可用：
+
+```mermaid
+graph LR
+    subgraph "Step 1: 后端 openai_compat.rs"
+        A["加一个构造函数<br/>fn xxx(api_key, model) → Self"]
+    end
+    subgraph "Step 2: 后端 router.rs"
+        B["加一个 match 分支<br/>'xxx' => OpenAICompatProvider::xxx()"]
+    end
+    subgraph "Step 3: 前端 SettingsView.tsx"
+        C["加下拉选项 + 模型建议列表"]
+    end
+
+    A --> B --> C
+    C --> D["✅ 文本对话可用<br/>✅ 视觉分析自动可用<br/>✅ 流式输出自动可用"]
+
+    style D fill:#27AE60,stroke:#333,color:#fff
+```
+
+**以 Gemini 为例：**
+
+| 文件 | 改动 | 代码量 |
+|------|------|--------|
+| `openai_compat.rs` | `fn gemini()` 构造函数 | 10 行 |
+| `router.rs` | `"gemini" => OpenAICompatProvider::gemini()` | 3 行 |
+| `SettingsView.tsx` | Provider 下拉 + 模型建议 | 10 行 |
+| `ModelSelector.tsx` | 聊天页选项 | 1 行 |
+| **视觉分析相关** | **不需要任何改动** | **0 行** |
+
+### 视觉分析的统一管道
+
+`analyze_screenshot_with_prompt` 不再自己做 HTTP 调用，而是通过标准 `ModelProvider::chat()` 管道：
+
+```mermaid
+graph TB
+    subgraph "视觉分析调用链"
+        VL["analyze_screenshot_with_prompt"]
+        VL --> IMG["压缩图片 → base64"]
+        IMG --> MSG["构建多模态 ChatMessage<br/>content: [image_url, text]"]
+        MSG --> ROUTE["ModelRouter.get_provider('vision')<br/>fallback → get_primary()"]
+        ROUTE --> CHAT["provider.chat(request)"]
+    end
+
+    subgraph "任何 OpenAI 兼容 Provider"
+        CHAT --> P1["Gemini Flash ✅"]
+        CHAT --> P2["GPT-4o ✅"]
+        CHAT --> P3["Qwen VL ✅"]
+        CHAT --> P4["Claude ✅"]
+        CHAT --> P5["新 Provider ✅<br/>自动支持"]
+    end
+
+    style ROUTE fill:#F39C12,stroke:#333,color:#000
+    style CHAT fill:#3498DB,stroke:#333,color:#fff
+```
+
+**关键机制：** `openai_compat.rs` 的消息映射层会检测 `content` 是否以 `[{"type"` 开头，如果是则解析为 JSON Value（多模态数组），否则当作纯文本。这意味着任何走 OpenAI 兼容格式的 Provider 都自动支持视觉输入。
+
+### 模型选择优先级
+
+视觉分析的 Provider 选择顺序：
+
+```
+models.vision（专用视觉模型）
+    ↓ 未配置时
+models.primary（主模型，如 Gemini Flash 本身就是多模态的）
+    ↓ 都没有
+报错提示配置
+```
+
+### 已支持的 Provider 列表
+
+| Provider | 标识 | 文本 | 视觉 | 流式 | 工具调用 |
+|----------|------|:----:|:----:|:----:|:-------:|
+| DeepSeek | `deepseek` | ✅ | ❌ | ✅ | ✅ |
+| 通义千问 | `dashscope` | ✅ | ❌ | ✅ | ✅ |
+| 通义千问 VL | `dashscope_vl` | ✅ | ✅ | ✅ | ✅ |
+| Google Gemini | `gemini` | ✅ | ✅ | ✅ | ✅ |
+| OpenAI | `openai` | ✅ | ✅ | ✅ | ✅ |
+| Anthropic Claude | `anthropic` | ✅ | ✅ | ✅ | ✅ |
+| 智谱 GLM | `zhipu` | ✅ | ❌ | ✅ | ✅ |
+| 月之暗面 Kimi | `moonshot` | ✅ | ❌ | ✅ | ✅ |
+| Ollama (本地) | `ollama` | ✅ | 取决于模型 | ✅ | ✅ |
+
+> Gemini Flash 是目前性价比最高的多模态方案：文本+视觉一体、1M 上下文、有免费额度。
+
+### 桌面端 ModelSelector 与设置页的关系
+
+| | 设置页 `models.primary` | 聊天页 ModelSelector |
+|---|---|---|
+| 作用范围 | 所有通道的默认模型（飞书/定时任务/桌面） | 仅当次桌面对话的临时覆盖 |
+| 持久性 | 写入 `auto-crab.toml`，永久生效 | 仅在聊天页切换时生效，不保存 |
+| 优先级 | 低 | 高（覆盖 primary） |
+
+聊天页选择的 Provider 通过 `modelOverride` 参数传入后端，Engine 日志会打印切换信息：
+```
+[Desktop] Model override: deepseek -> gemini
+[Engine] Round 0 - calling Google Gemini (gemini) with 3 messages ...
+```
+
+---
+
 ### 架构优势
 
 - **Agent 引擎统一** — `AgentEngine` 是唯一的 Agent 循环实现，桌面/飞书/企业微信/定时任务四条路径共用

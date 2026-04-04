@@ -87,7 +87,7 @@ export function ChatView() {
     try {
       const result = await invoke<{ success: boolean; data?: string; error?: string }>(
         "chat_stream_start",
-        { message: text, history },
+        { message: text, history, modelOverride: selectedModel || undefined },
       );
 
       if (!result.success) {

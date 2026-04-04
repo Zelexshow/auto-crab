@@ -128,7 +128,7 @@ impl RemoteConversationState {
     }
 }
 
-fn create_memory(cfg: &config::AppConfig) -> Option<std::sync::Arc<core::long_memory::LongTermMemory>> {
+pub(crate) fn create_memory(cfg: &config::AppConfig) -> Option<std::sync::Arc<core::long_memory::LongTermMemory>> {
     if !cfg.agent.long_term_memory {
         return None;
     }

@@ -74,17 +74,18 @@ impl RiskEngine {
     }
 
     pub fn assess(&self, operation: &str) -> RiskLevel {
+        let default_level = DEFAULT_RISK_MAP.get(operation).cloned();
+
+        // Forbidden in the default map cannot be overridden — always stays Forbidden
+        if default_level == Some(RiskLevel::Forbidden) {
+            return RiskLevel::Forbidden;
+        }
+
         if let Some(level) = self.overrides.get(operation) {
-            if *level == RiskLevel::Forbidden {
-                return RiskLevel::Forbidden;
-            }
             return level.clone();
         }
 
-        DEFAULT_RISK_MAP
-            .get(operation)
-            .cloned()
-            .unwrap_or(RiskLevel::Dangerous)
+        default_level.unwrap_or(RiskLevel::Dangerous)
     }
 
     pub fn is_allowed(&self, operation: &str) -> bool {
@@ -127,9 +128,14 @@ mod tests {
         let mut overrides = HashMap::new();
         overrides.insert("format_disk".into(), RiskLevel::Safe);
         let engine = RiskEngine::new(overrides);
-        // Forbidden operations cannot be overridden via config
-        // (the default map still says Forbidden)
-        // Note: in our impl, overrides take precedence except for Forbidden in defaults
-        // Let's fix this: overrides should NOT be able to lower Forbidden
+        assert_eq!(engine.assess("format_disk"), RiskLevel::Forbidden);
+    }
+
+    #[test]
+    fn test_override_can_relax_non_forbidden() {
+        let mut overrides = HashMap::new();
+        overrides.insert("execute_shell".into(), RiskLevel::Moderate);
+        let engine = RiskEngine::new(overrides);
+        assert_eq!(engine.assess("execute_shell"), RiskLevel::Moderate);
     }
 }

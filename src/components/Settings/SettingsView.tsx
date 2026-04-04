@@ -12,6 +12,7 @@ const PROVIDERS = [
   { value: "moonshot", label: "月之暗面 Kimi" },
   { value: "openai", label: "OpenAI" },
   { value: "anthropic", label: "Anthropic Claude" },
+  { value: "gemini", label: "Google Gemini" },
   { value: "ollama", label: "Ollama (本地)" },
 ];
 
@@ -23,6 +24,7 @@ const PROVIDER_KEY_MAP: Record<string, string> = {
   moonshot: "moonshot",
   openai: "openai",
   anthropic: "anthropic",
+  gemini: "gemini",
   ollama: "",
 };
 
@@ -58,6 +60,11 @@ const MODEL_SUGGESTIONS: Record<string, { value: string; label: string }[]> = {
   anthropic: [
     { value: "claude-sonnet-4-20250514", label: "Claude Sonnet 4" },
     { value: "claude-3-5-haiku-20241022", label: "Claude 3.5 Haiku" },
+  ],
+  gemini: [
+    { value: "gemini-2.5-flash", label: "Gemini 2.5 Flash (推荐, 高性价比)" },
+    { value: "gemini-2.5-pro", label: "Gemini 2.5 Pro (最强推理)" },
+    { value: "gemini-2.0-flash", label: "Gemini 2.0 Flash" },
   ],
   ollama: [
     { value: "qwen2.5:14b", label: "qwen2.5:14b" },
@@ -272,7 +279,7 @@ export function SettingsView() {
       if (res.success && res.data) setSearchStats(res.data);
     }).catch(() => {});
 
-    const knownKeys = ["dashscope", "deepseek", "zhipu", "moonshot", "openai", "anthropic", "feishu-secret", "wechat-work-secret"];
+    const knownKeys = ["dashscope", "deepseek", "zhipu", "moonshot", "openai", "anthropic", "gemini", "feishu-secret", "wechat-work-secret"];
     invoke<{ success: boolean; data?: { key: string; exists: boolean }[] }>("check_credentials", { keys: knownKeys }).then((res) => {
       if (res.success && res.data) {
         const m: Record<string, boolean> = {};
@@ -1518,6 +1525,7 @@ export function SettingsView() {
                     { key: "moonshot", label: "Kimi (Moonshot)" },
                     { key: "openai", label: "OpenAI" },
                     { key: "anthropic", label: "Anthropic (Claude)" },
+                    { key: "gemini", label: "Google Gemini" },
                   ].map(({ key: k }) => (
                     <CredentialRow key={k} name={k} exists={credentialStatuses[k]} onEdit={(name) => {
                       setKeyName(name);
@@ -1629,6 +1637,7 @@ export function SettingsView() {
                       <option value="moonshot">moonshot (Kimi)</option>
                       <option value="openai">openai</option>
                       <option value="anthropic">anthropic (Claude)</option>
+                      <option value="gemini">gemini (Google)</option>
                     </optgroup>
                     <optgroup label="🔗 远程控制">
                       <option value="feishu-secret">feishu-secret (飞书)</option>

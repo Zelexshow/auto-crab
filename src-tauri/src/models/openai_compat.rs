@@ -128,6 +128,18 @@ impl OpenAICompatProvider {
             supports_tools: true,
         })
     }
+
+    pub fn gemini(api_key: &str, model: &str) -> Self {
+        Self::new(OpenAICompatConfig {
+            provider_name: "gemini".into(),
+            display_name: "Google Gemini".into(),
+            base_url: "https://generativelanguage.googleapis.com/v1beta/openai".into(),
+            api_key: api_key.into(),
+            model: model.into(),
+            max_context: 1000000,
+            supports_tools: true,
+        })
+    }
 }
 
 #[derive(Serialize)]

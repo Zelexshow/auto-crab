@@ -1,9 +1,11 @@
 pub mod agent;
 pub mod context;
 pub mod engine;
+pub mod hooks;
 pub mod long_memory;
 pub mod macros;
 pub mod memory;
+pub mod orchestrator;
 pub mod planner;
 pub mod scheduler;
 pub mod snapshots;

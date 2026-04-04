@@ -14,6 +14,7 @@ const MODELS: ModelOption[] = [
   { provider: "moonshot", label: "Kimi", isLocal: false },
   { provider: "openai", label: "OpenAI", isLocal: false },
   { provider: "anthropic", label: "Claude", isLocal: false },
+  { provider: "gemini", label: "Gemini", isLocal: false },
   { provider: "ollama", label: "Ollama 本地", isLocal: true },
 ];
 

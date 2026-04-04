@@ -134,6 +134,8 @@ pub struct SecurityConfig {
     pub auto_lock_minutes: u32,
     #[serde(default)]
     pub risk_overrides: HashMap<String, RiskLevel>,
+    #[serde(default)]
+    pub hooks: HooksConfig,
 }
 
 impl Default for SecurityConfig {
@@ -142,6 +144,27 @@ impl Default for SecurityConfig {
             master_password_required: true,
             auto_lock_minutes: default_lock_minutes(),
             risk_overrides: HashMap::new(),
+            hooks: HooksConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HooksConfig {
+    #[serde(default = "default_true")]
+    pub security_patterns_enabled: bool,
+    #[serde(default)]
+    pub custom_rules: Vec<crate::core::hooks::HookRuleConfig>,
+    #[serde(default)]
+    pub stop_verification: bool,
+}
+
+impl Default for HooksConfig {
+    fn default() -> Self {
+        Self {
+            security_patterns_enabled: true,
+            custom_rules: vec![],
+            stop_verification: false,
         }
     }
 }

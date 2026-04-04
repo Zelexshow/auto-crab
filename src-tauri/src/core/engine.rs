@@ -37,6 +37,8 @@ pub trait EventSink: Send + Sync {
     /// Whether this sink needs streaming UX. Remote sinks (Feishu etc.) return false
     /// to skip redundant LLM calls when content is already available.
     fn needs_streaming(&self) -> bool { true }
+    /// Progress update from a sub-agent (default no-op).
+    fn on_sub_agent_progress(&self, _agent_id: &str, _status: &str, _stream_id: &str) {}
 }
 
 // ── Agent engine config ─────────────────────────────────────────────
@@ -72,6 +74,7 @@ pub struct AgentEngine {
     tool_defs: Vec<ToolDefinition>,
     cfg: AppConfig,
     mcp_client: Option<Arc<crate::mcp::client::McpClientManager>>,
+    hooks: super::hooks::HookManager,
 }
 
 impl AgentEngine {
@@ -88,6 +91,12 @@ impl AgentEngine {
             .map(|s| PathBuf::from(shellexpand::tilde(s).to_string()))
             .collect();
 
+        let hooks = super::hooks::HookManager::new(
+            cfg.security.hooks.security_patterns_enabled,
+            cfg.security.hooks.stop_verification,
+            cfg.security.hooks.custom_rules.clone(),
+        );
+
         Ok(Self {
             provider,
             file_ops: FileOps::new(file_roots),
@@ -98,6 +107,7 @@ impl AgentEngine {
             tool_defs: ToolRegistry::new().to_tool_definitions(),
             cfg: cfg.clone(),
             mcp_client: None,
+            hooks,
         })
     }
 
@@ -119,6 +129,11 @@ impl AgentEngine {
         self.tool_defs = defs;
     }
 
+    /// Create an Orchestrator that shares this engine's provider and config.
+    pub fn orchestrator(&self) -> super::orchestrator::Orchestrator {
+        super::orchestrator::Orchestrator::new(self.provider.clone(), self.cfg.clone())
+    }
+
     pub async fn run(
         &self,
         messages: Vec<ChatMessage>,
@@ -135,9 +150,9 @@ impl AgentEngine {
                 // Skip memory recall for very short messages (greetings, commands, etc.)
                 if user_msg.role == MessageRole::User && msg_len > 10 {
                     let recall_start = std::time::Instant::now();
-                    // 3s timeout — don't let slow embedding API block the conversation
+                    // 10s timeout — DashScope Embedding API can take 3-5s, plus disk I/O for loading memories
                     match tokio::time::timeout(
-                        std::time::Duration::from_secs(3),
+                        std::time::Duration::from_secs(10),
                         mem.recall(&user_msg.content, Some(3))
                     ).await {
                         Ok(Ok(recalls)) if !recalls.is_empty() => {
@@ -159,7 +174,7 @@ impl AgentEngine {
                             tracing::warn!("[Memory] Recall error (took {:.1}s): {}", recall_start.elapsed().as_secs_f64(), e);
                         }
                         Err(_) => {
-                            tracing::warn!("[Memory] Recall timed out after 3s, skipping");
+                            tracing::warn!("[Memory] Recall timed out after 10s, skipping");
                         }
                     }
                 }
@@ -183,17 +198,10 @@ impl AgentEngine {
         result
     }
 
-    /// Rough char-count estimate; trim tool_result messages if total exceeds threshold.
+    /// Legacy trim wrapper — delegates to smart_trim from context module.
     fn trim_context_if_needed(messages: &mut Vec<ChatMessage>, max_chars: usize) {
-        let total: usize = messages.iter().map(|m| m.content.len()).sum();
-        if total <= max_chars { return; }
-        tracing::warn!("[Engine] Context too large ({} chars, max {}), trimming tool results", total, max_chars);
-        for msg in messages.iter_mut() {
-            if msg.role == MessageRole::Tool && msg.content.len() > 2000 {
-                let truncated: String = msg.content.chars().take(1500).collect();
-                msg.content = format!("{}...\n[结果已截断，原始长度: {} 字符]", truncated, msg.content.len());
-            }
-        }
+        super::context::dedup_tool_results(messages);
+        super::context::compress_old_results(messages, max_chars);
     }
 
     /// Direct Agent loop with full streaming support (main path for simple tasks).
@@ -205,6 +213,8 @@ impl AgentEngine {
         agent_cfg: &AgentConfig,
     ) -> String {
         let mut messages = messages;
+        let mut had_tool_calls = false;
+        let mut trim_history: Vec<super::context::TrimEvent> = Vec::new();
 
         for round in 0..=agent_cfg.max_rounds {
             let use_tools = round < agent_cfg.max_rounds && agent_cfg.tools_enabled && self.cfg.tools.shell_enabled;
@@ -221,7 +231,17 @@ impl AgentEngine {
 
             sink.on_thinking(round as u32, stream_id);
 
-            Self::trim_context_if_needed(&mut messages, 120_000);
+            let (updated_history, thrashing) = super::context::smart_trim(
+                &mut messages, 120_000, round, trim_history,
+            );
+            trim_history = updated_history;
+            if thrashing {
+                let msg = "上下文反复膨胀无法有效压缩，请缩小任务范围或开启新对话。".to_string();
+                sink.on_error(&msg, stream_id);
+                sink.on_final_answer(&msg, stream_id);
+                sink.on_done(stream_id);
+                return msg;
+            }
 
             let req = ChatRequest {
                 messages: messages.clone(),
@@ -231,7 +251,8 @@ impl AgentEngine {
             };
 
             let msg_chars: usize = messages.iter().map(|m| m.content.len()).sum();
-            tracing::info!("[Engine] Round {} - calling model with {} messages ({} chars), tools: {}", round, messages.len(), msg_chars, use_tools);
+            let _pi = self.provider.info();
+            tracing::info!("[Engine] Round {} - calling {} ({}) with {} messages ({} chars), tools: {}", round, _pi.display_name, _pi.name, messages.len(), msg_chars, use_tools);
 
             let resp = {
                 let mut last_err = String::new();
@@ -269,6 +290,7 @@ impl AgentEngine {
             let tool_calls = resp.message.tool_calls.clone().unwrap_or_default();
 
             if !tool_calls.is_empty() {
+                had_tool_calls = true;
                 for tc in &tool_calls {
                     let step_id = uuid::Uuid::new_v4().to_string();
                     let result = self.execute_tool_call(tc, sink, stream_id, &step_id, agent_cfg).await;
@@ -289,6 +311,25 @@ impl AgentEngine {
                     });
                 }
                 continue;
+            }
+
+            // Stop hook: verify task completeness before returning final answer
+            if had_tool_calls {
+                match self.hooks.run_stop_check(true, round) {
+                    super::hooks::HookDecision::Deny { reason } => {
+                        tracing::info!("[Hooks] Stop denied, continuing: {}", reason);
+                        messages.push(ChatMessage {
+                            role: MessageRole::System,
+                            content: format!("请继续完成任务，不要停止。原因: {}", reason),
+                            name: None, tool_calls: None, tool_call_id: None,
+                        });
+                        continue;
+                    }
+                    super::hooks::HookDecision::Warn { message } => {
+                        tracing::info!("[Hooks] Stop warning: {}", message);
+                    }
+                    super::hooks::HookDecision::Allow => {}
+                }
             }
 
             let content = resp.message.content;
@@ -409,17 +450,23 @@ impl AgentEngine {
                 }
             }
 
-            // Execute this step with limited rounds
-            let step_cfg = AgentConfig {
-                max_rounds: 4,
-                tools_enabled: agent_cfg.tools_enabled,
-                audit: agent_cfg.audit.clone(),
-                audit_source: agent_cfg.audit_source.clone(),
-                memory: None,
-                planning_enabled: false,
+            // Execute this step: parallel sub-agents or single run_simple
+            let step_result = if let Some(ref sub_tasks) = step.parallel_sub_tasks {
+                let orch = self.orchestrator();
+                let system_prompt = &self.cfg.agent.system_prompt;
+                let results = orch.fan_out(system_prompt, sub_tasks.clone(), sink, stream_id).await;
+                orch.fan_in(&results)
+            } else {
+                let step_cfg = AgentConfig {
+                    max_rounds: 4,
+                    tools_enabled: agent_cfg.tools_enabled,
+                    audit: agent_cfg.audit.clone(),
+                    audit_source: agent_cfg.audit_source.clone(),
+                    memory: None,
+                    planning_enabled: false,
+                };
+                self.run_simple(step_messages, stream_id, sink, &step_cfg).await
             };
-
-            let step_result = self.run_simple(step_messages, stream_id, sink, &step_cfg).await;
 
             // Reflect on the result
             let decision = match planner.reflect(&plan, &step_result).await {
@@ -530,7 +577,8 @@ impl AgentEngine {
             };
 
             let msg_chars: usize = messages.iter().map(|m| m.content.len()).sum();
-            tracing::info!("[Engine] Round {} - calling model with {} messages ({} chars), tools: {}", round, messages.len(), msg_chars, use_tools);
+            let _pi = self.provider.info();
+            tracing::info!("[Engine] Round {} - calling {} ({}) with {} messages ({} chars), tools: {}", round, _pi.display_name, _pi.name, messages.len(), msg_chars, use_tools);
 
             let resp = {
                 let mut last_err = String::new();
@@ -620,6 +668,24 @@ impl AgentEngine {
             return msg;
         }
 
+        // PreToolUse hooks — security pattern & custom rule checks
+        match self.hooks.run_pre_tool_use(&tc.name, &tc.arguments) {
+            super::hooks::HookDecision::Deny { reason } => {
+                let msg = format!("Hook 拦截: {}", reason);
+                tracing::warn!("[Hooks] PreToolUse denied {}: {}", tc.name, reason);
+                sink.on_tool_result(step_id, &tc.name, &msg, "error", stream_id);
+                if let Some(ref a) = agent_cfg.audit {
+                    let _ = a.log(op, risk, AuditStatus::Blocked, &format!("hook_deny: {}", reason), agent_cfg.audit_source.clone()).await;
+                }
+                return msg;
+            }
+            super::hooks::HookDecision::Warn { message } => {
+                tracing::info!("[Hooks] PreToolUse warning for {}: {}", tc.name, message);
+                sink.on_tool_result(step_id, &tc.name, &format!("⚠️ {}", message), "warning", stream_id);
+            }
+            super::hooks::HookDecision::Allow => {}
+        }
+
         // Approval check
         let is_safe_shell = tc.name == "execute_shell" && crate::commands::is_readonly_shell_command_pub(&tc.arguments);
         let needs_approval = !is_safe_shell && matches!(
@@ -657,9 +723,15 @@ impl AgentEngine {
         } else {
             crate::commands::dispatch_tool(tc, &self.file_ops, &self.shell).await
         };
-        let result = self.resolve_tool_action(&raw_result).await;
+        let resolved = self.resolve_tool_action(&raw_result).await;
+        let result = super::context::cap_tool_result(&resolved);
         let tool_ms = tool_start.elapsed().as_millis() as u64;
         crate::commands::record_perf_event("tool_call", &tc.name, tool_ms);
+
+        // PostToolUse hooks
+        if let Some(feedback) = self.hooks.run_post_tool_use(&tc.name, &tc.arguments, &result) {
+            tracing::info!("[Hooks] PostToolUse feedback for {}: {}", tc.name, feedback);
+        }
 
         // Audit
         if let Some(ref a) = agent_cfg.audit {
@@ -788,8 +860,7 @@ impl AgentEngine {
             if let Some(sep) = rest.find("::") {
                 let contact = &rest[..sep];
                 let message = &rest[sep + 2..];
-                let task = format!("在微信中找到联系人或群聊「{}」，点击进入聊天，在输入框中输入「{}」，然后按回车发送", contact, message);
-                return crate::commands::execute_analyze_and_act(&self.cfg, &task, 5).await;
+                return self.execute_wechat_reply(contact, message).await;
             }
         }
         if raw.starts_with("__ANALYZE_AND_ACT__:") {
@@ -812,6 +883,62 @@ impl AgentEngine {
             }
         }
         raw.to_string()
+    }
+
+    /// Reliable WeChat reply: focus window, type message, press Enter.
+    /// Minimal steps — no Escape, no mouse click, no re-focus.
+    /// If focus fails, abort immediately to avoid typing into wrong window.
+    async fn execute_wechat_reply(&self, contact: &str, message: &str) -> String {
+        use crate::commands::*;
+
+        // 1. Focus WeChat window — abort entirely if this fails
+        let focus_result = tokio::task::spawn_blocking({
+            let title = "微信".to_string();
+            move || crate::tools::ui_automation::focus_window_by_title(&title)
+        }).await;
+
+        match &focus_result {
+            Ok(Ok(msg)) => tracing::info!("[WeChat] {}", msg),
+            Ok(Err(e)) => return format!("❌ 聚焦微信窗口失败，已中止操作（防止误输入到其他窗口）: {}", e),
+            Err(e) => return format!("❌ 聚焦微信窗口失败，已中止操作: {}", e),
+        }
+
+        // Wait for window to fully activate
+        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+
+        // 2. Verify WeChat is still in foreground before typing
+        let verify = tokio::task::spawn_blocking(|| {
+            #[cfg(target_os = "windows")]
+            {
+                use windows::Win32::UI::WindowsAndMessaging::*;
+                unsafe {
+                    let hwnd = GetForegroundWindow();
+                    let mut buf = [0u16; 256];
+                    let len = GetWindowTextW(hwnd, &mut buf) as usize;
+                    let title = String::from_utf16_lossy(&buf[..len]);
+                    title.contains("微信")
+                }
+            }
+            #[cfg(not(target_os = "windows"))]
+            { true }
+        }).await.unwrap_or(false);
+
+        if !verify {
+            return "❌ 微信窗口未在前台，已中止操作（防止误输入到其他窗口）。请确保微信窗口可见且未被遮挡。".to_string();
+        }
+
+        // 3. Type the message — WeChat input box is auto-focused when window activates
+        if let Err(e) = do_keyboard_type_pub(message).await {
+            return format!("❌ 输入消息失败: {}", e);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        // 4. Press Enter to send
+        if let Err(e) = do_key_press_pub("enter").await {
+            return format!("已输入消息但发送失败: {}", e);
+        }
+
+        format!("✅ 已发送消息给「{}」: {}", contact, message)
     }
 }
 

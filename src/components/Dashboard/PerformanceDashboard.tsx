@@ -45,26 +45,30 @@ function StatCard({ icon, label, value, sub, trend }: {
 }) {
   return (
     <div
-      className="stat-card rounded-xl p-4"
+      className="stat-card rounded-xl"
       style={{
         background: "var(--bg-secondary)",
         border: "1px solid var(--border)",
         boxShadow: "var(--shadow-sm)",
+        padding: "16px 18px",
+        minWidth: 0,
       }}
     >
-      <div className="flex items-center justify-between mb-2">
-        <div className="w-8 h-8 rounded-lg flex items-center justify-center" style={{ background: "var(--accent-light)" }}>
+      <div className="flex items-center gap-3">
+        <div className="w-9 h-9 rounded-lg flex items-center justify-center shrink-0" style={{ background: "var(--accent-light)" }}>
           {icon}
         </div>
+        <div style={{ minWidth: 0 }}>
+          <div className="text-2xl font-bold tabular-nums leading-tight" style={{ color: "var(--text-primary)" }}>{value}</div>
+          <div className="text-xs mt-0.5" style={{ color: "var(--text-muted)" }}>{label}</div>
+        </div>
         {trend && (
-          <span style={{ color: trend === "up" ? "var(--success)" : trend === "down" ? "var(--danger)" : "var(--text-muted)" }}>
+          <span className="ml-auto shrink-0" style={{ color: trend === "up" ? "var(--success)" : trend === "down" ? "var(--danger)" : "var(--text-muted)" }}>
             {trend === "up" ? <ArrowUpRight size={14} /> : trend === "down" ? <ArrowDownRight size={14} /> : <Minus size={14} />}
           </span>
         )}
       </div>
-      <div className="text-xl font-bold tabular-nums" style={{ color: "var(--text-primary)" }}>{value}</div>
-      <div className="text-xs mt-0.5" style={{ color: "var(--text-muted)" }}>{label}</div>
-      {sub && <div className="text-[10px] mt-1" style={{ color: "var(--text-muted)" }}>{sub}</div>}
+      {sub && <div className="text-[11px] mt-2 pl-12" style={{ color: "var(--text-muted)" }}>{sub}</div>}
     </div>
   );
 }
@@ -253,7 +257,7 @@ export function PerformanceDashboard() {
         <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
 
         {/* Stats grid */}
-        <div className="grid grid-cols-5 gap-3">
+        <div className="grid gap-4" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))" }}>
           <StatCard
             icon={<Zap size={16} style={{ color: "var(--accent)" }} />}
             label="飞书对话"
@@ -366,10 +370,10 @@ export function PerformanceDashboard() {
           {events.length > 0 ? (
             <div className="space-y-0.5">
               <div className="flex items-center gap-3 px-2 py-1.5 text-[10px] font-medium" style={{ color: "var(--text-muted)" }}>
-                <span className="w-16">时间</span>
-                <span className="w-16">类型</span>
+                <span className="w-[70px]">时间</span>
+                <span className="w-20">类型</span>
                 <span className="flex-1">详情</span>
-                <span className="w-16 text-right">耗时</span>
+                <span className="w-[70px] text-right">耗时</span>
                 <span className="w-28">耗时分布</span>
               </div>
               {events.map((ev, i) => {
@@ -383,10 +387,10 @@ export function PerformanceDashboard() {
                     className="flex items-center gap-3 px-2 py-2 rounded-md transition-colors"
                     style={{ background: i % 2 === 0 ? "transparent" : "var(--bg-tertiary)" }}
                   >
-                    <span className="text-[11px] tabular-nums w-16 shrink-0" style={{ color: "var(--text-muted)" }}>
+                    <span className="text-[11px] tabular-nums w-[70px] shrink-0" style={{ color: "var(--text-muted)" }}>
                       {ev.timestamp.split(" ")[1] || ev.timestamp}
                     </span>
-                    <span className="flex items-center gap-1.5 w-16 shrink-0">
+                    <span className="flex items-center gap-1.5 w-20 shrink-0">
                       <EventTypeIcon type={ev.event_type} />
                       <span className="text-[11px]" style={{ color: "var(--text-secondary)" }}>
                         {EVENT_TYPE_LABELS[ev.event_type] || ev.event_type}
@@ -396,7 +400,7 @@ export function PerformanceDashboard() {
                       {ev.label}
                     </span>
                     <span
-                      className="text-[11px] tabular-nums w-16 text-right font-medium shrink-0"
+                      className="text-[11px] tabular-nums w-[70px] text-right font-medium shrink-0"
                       style={{ color: ev.duration_ms > 30000 ? "var(--danger)" : ev.duration_ms > 10000 ? "var(--warning)" : "var(--text-primary)" }}
                     >
                       {formatDuration(ev.duration_ms)}

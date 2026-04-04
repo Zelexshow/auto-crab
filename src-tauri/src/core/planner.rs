@@ -7,6 +7,8 @@ pub struct TaskStep {
     pub description: String,
     pub status: StepStatus,
     pub result: Option<String>,
+    /// If set, this step launches parallel sub-agents instead of a single run_simple call.
+    pub parallel_sub_tasks: Option<Vec<super::orchestrator::SubAgentTask>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -114,6 +116,7 @@ r#"你是一个任务规划助手。用户给出一个目标，你需要将其�
                 description: desc,
                 status: StepStatus::Pending,
                 result: None,
+                parallel_sub_tasks: None,
             }).collect(),
             current_step: 0,
             is_complete: false,
@@ -384,9 +387,9 @@ mod tests {
         let mut plan = TaskPlan {
             goal: "测试任务".to_string(),
             steps: vec![
-                TaskStep { id: 0, description: "步骤1".into(), status: StepStatus::Done, result: None },
-                TaskStep { id: 1, description: "步骤2".into(), status: StepStatus::Running, result: None },
-                TaskStep { id: 2, description: "步骤3".into(), status: StepStatus::Pending, result: None },
+                TaskStep { id: 0, description: "步骤1".into(), status: StepStatus::Done, result: None, parallel_sub_tasks: None },
+                TaskStep { id: 1, description: "步骤2".into(), status: StepStatus::Running, result: None, parallel_sub_tasks: None },
+                TaskStep { id: 2, description: "步骤3".into(), status: StepStatus::Pending, result: None, parallel_sub_tasks: None },
             ],
             current_step: 1,
             is_complete: false,
