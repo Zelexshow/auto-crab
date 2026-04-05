@@ -1354,12 +1354,16 @@ pie title 投资分析权重（示意）
 
 ## 知识库集成（Obsidian）
 
-与 **Obsidian** 等本地库协作时，强调 **路径分类、YAML 兼容与可选会话落盘**。
+> 详细设计文档：[`docs/KNOWLEDGE-BASE-DESIGN.md`](KNOWLEDGE-BASE-DESIGN.md)
+> 共享规范：`auto-notebook/KNOWLEDGE-BASE-DESIGN.md`
+
+与 **Obsidian** 等本地库协作，auto-crab 作为**生产端**生成结构化文档，auto-notebook 作为**消费端**负责索引、RAG 检索和复盘。两者共享同一 vault 路径。
 
 | 项 | 说明 |
 |----|------|
-| **按类目路由** | 写入内容按语义类目映射到不同目录，例如 **invest → invest-explore**，**boss → boss-explore**，**news → hot-news**（具体映射以配置与实现为准）。 |
-| **YAML Frontmatter** | 自动生成 **YAML 前置元数据**，便于 Obsidian 属性、Dataview 与双向链接。 |
+| **按类目路由** | 写入内容按任务名关键词映射到 **7 个分类目录**：`invest-explore`、`boss-explore`、`hot-news`、`tech-notes`、`thinking`、`reference`、`general`（兜底）。映射可在 `[knowledge].routing` 中自定义。 |
+| **YAML Frontmatter** | 自动生成 **8 个字段**：`task`、`date`、`time`（引号包裹）、`category`、`tags`、`source`、`summary`、`related`。兼容 Obsidian 属性、Dataview 与双向链接。 |
+| **标签体系** | 自动生成的标签遵循统一规范：领域标签 + 类型标签 + 关键词标签 + 项目标签（`proj:auto-crab`）。 |
 | **会话存档** | 配置 **`save_conversations`** 时，可将 **交互式对话输出** 按规则保存到知识库路径，便于复盘与二次编辑。 |
 
 ```mermaid
@@ -1368,19 +1372,28 @@ flowchart TB
         I["invest"]
         B["boss"]
         N["news"]
+        T["tech"]
+        TH["thinking"]
+        R["reference"]
     end
 
-    subgraph Vault["Obsidian 库（示例）"]
+    subgraph Vault["Obsidian 库"]
         P1["invest-explore/"]
         P2["boss-explore/"]
         P3["hot-news/"]
+        P4["tech-notes/"]
+        P5["thinking/"]
+        P6["reference/"]
     end
 
     I --> P1
     B --> P2
     N --> P3
+    T --> P4
+    TH --> P5
+    R --> P6
 
-    CHAT["交互聊天"] -->|"save_conversations"| P1
+    CHAT["交互聊天"] -->|"save_conversations"| Vault
 ```
 
 ---
@@ -1540,7 +1553,7 @@ graph TB
 | 定时任务调度 | ✅ 已完成 | `TaskScheduler` 接入主循环，本地时间 cron 匹配，飞书推送 |
 | MCP Client / Server | ✅ 已完成 | `rmcp` v1.3.0，`[mcp]` 配置，`--mcp-server` 对外暴露工具 |
 | 飞书远程优化 | ✅ 已完成 | 无 Planner、非流式跳过流式收尾、记忆 3s 超时、DSML 重试、max_rounds=4、`/help` `/new` `/clear` |
-| Obsidian / 知识库 | ✅ 已集成 | 类目路由、YAML frontmatter、`save_conversations` 可选落盘 |
+| Obsidian / 知识库 | ✅ 已集成 | 7 类目路由、8 字段 frontmatter（含 source/summary/related）、统一标签体系、与 auto-notebook 共享 vault |
 | 模型调用容错 | ✅ 已完成 | Provider 层详细日志 + Engine 层自动重试 + Context 层上下文截断，三层防护 |
 | 性能监控持久化 | ✅ 已完成 | `perf-events.jsonl` JSONL 落盘 + 启动加载，重启不丢数据 |
 | 统一数据目录 | ✅ 已完成 | 所有模块（审计、记忆、快照、性能）统一使用 Tauri `app_data_dir` |

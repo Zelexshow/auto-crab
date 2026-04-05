@@ -106,6 +106,9 @@ export function SettingsView() {
     invest: "invest-explore",
     boss: "boss-explore",
     news: "hot-news",
+    tech: "tech-notes",
+    thinking: "thinking",
+    reference: "reference",
     default: "general",
   });
 
@@ -783,10 +786,13 @@ export function SettingsView() {
               <Card title="智能分类路由" desc="不同类型的内容自动归档到对应目录">
                 <div className="space-y-2">
                   {[
-                    { key: "invest", icon: "📈", label: "投资/理财", desc: "投资简报、盘面分析、行情日报" },
-                    { key: "boss", icon: "💡", label: "创业/副业", desc: "创业灵感、商业机会分析" },
-                    { key: "news", icon: "📰", label: "科技/热点", desc: "科技日报、选题推荐、热点新闻" },
-                    { key: "default", icon: "📁", label: "其他/通用", desc: "未匹配到上述类别的内容" },
+                    { key: "invest", icon: "📈", label: "投资/理财", desc: "投资简报、盘面分析、行情日报", fallback: "invest-explore" },
+                    { key: "boss", icon: "💡", label: "创业/副业", desc: "创业灵感、商业机会分析", fallback: "boss-explore" },
+                    { key: "news", icon: "📰", label: "资讯/热点", desc: "新闻日报、选题推荐、热点新闻", fallback: "hot-news" },
+                    { key: "tech", icon: "🔧", label: "技术笔记", desc: "编程技巧、架构设计、AI 提示词", fallback: "tech-notes" },
+                    { key: "thinking", icon: "🧠", label: "思考记录", desc: "周记、复盘、想法碎片", fallback: "thinking" },
+                    { key: "reference", icon: "📚", label: "长期参考", desc: "API 文档、流程指南、配置说明", fallback: "reference" },
+                    { key: "default", icon: "📁", label: "其他/通用", desc: "未匹配到上述类别的内容", fallback: "general" },
                   ].map(item => (
                     <div key={item.key} className="flex items-center gap-3 p-2 rounded" style={{ background: "var(--bg-tertiary)" }}>
                       <span className="text-lg">{item.icon}</span>
@@ -795,7 +801,7 @@ export function SettingsView() {
                         <div className="text-[11px]" style={{ color: "var(--text-muted)" }}>{item.desc}</div>
                       </div>
                       <span className="text-[12px] font-mono px-2 py-0.5 rounded" style={{ background: "var(--bg-primary)", color: "var(--accent)" }}>
-                        {vaultRouting[item.key] || (item.key === "invest" ? "invest-explore" : item.key === "boss" ? "boss-explore" : item.key === "news" ? "hot-news" : "general")}
+                        {vaultRouting[item.key] || item.fallback}
                       </span>
                     </div>
                   ))}
@@ -806,8 +812,8 @@ export function SettingsView() {
                 <p className="font-medium" style={{ color: "var(--text-secondary)" }}>工作方式</p>
                 <p>• 每次定时任务产出后，根据任务类型自动存入对应目录</p>
                 <p>• 文件结构：<code className="px-1 py-0.5 rounded text-[12px]" style={{ background: "var(--bg-tertiary)" }}>invest-explore/2026-03-28/0935-晨间投资简报.md</code></p>
-                <p>• 每个文件带 YAML frontmatter（date/tags/category），Obsidian 可直接检索和关联</p>
-                <p>• 周度复盘自动读取三个目录的近 7 天笔记，生成综合分析报告</p>
+                <p>• 每个文件带 YAML frontmatter（task/date/time/category/tags/source/summary），Obsidian 可直接检索和关联</p>
+                <p>• 与 auto-notebook 共享同一知识库，由 auto-notebook 负责索引、分块、RAG 检索和定期复盘</p>
                 <p>• 支持 Obsidian、Logseq 或任何基于 Markdown 文件的知识库工具</p>
               </div>
             </Section>

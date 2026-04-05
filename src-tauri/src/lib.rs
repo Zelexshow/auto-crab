@@ -561,20 +561,85 @@ pub fn resolve_vault_subdir(knowledge: &config::KnowledgeConfig, task_name: &str
         return knowledge.routing.get("boss")
             .cloned().unwrap_or_else(|| "boss-explore".into());
     }
-    // News / tech / topics
-    if lower.contains("日报") || lower.contains("新闻") || lower.contains("科技")
+    // News / hot topics
+    if lower.contains("日报") || lower.contains("新闻")
         || lower.contains("选题") || lower.contains("news") || lower.contains("热点") {
         return knowledge.routing.get("news")
             .cloned().unwrap_or_else(|| "hot-news".into());
+    }
+    // Tech notes
+    if lower.contains("技术") || lower.contains("编程") || lower.contains("代码")
+        || lower.contains("tech") || lower.contains("coding") || lower.contains("架构")
+        || lower.contains("科技") {
+        return knowledge.routing.get("tech")
+            .cloned().unwrap_or_else(|| "tech-notes".into());
+    }
+    // Thinking / review
+    if lower.contains("思考") || lower.contains("复盘") || lower.contains("总结")
+        || lower.contains("周记") || lower.contains("反思") || lower.contains("thinking") {
+        return knowledge.routing.get("thinking")
+            .cloned().unwrap_or_else(|| "thinking".into());
+    }
+    // Reference material
+    if lower.contains("参考") || lower.contains("指南") || lower.contains("文档")
+        || lower.contains("reference") || lower.contains("guide") {
+        return knowledge.routing.get("reference")
+            .cloned().unwrap_or_else(|| "reference".into());
     }
     // Fallback
     knowledge.routing.get("default")
         .cloned().unwrap_or_else(|| "general".into())
 }
 
+/// Generate tags based on subdirectory and task name, following the unified
+/// tag system: domain + type + project tags, with keyword-based extras.
+fn generate_vault_tags(subdir: &str, task_name: &str) -> Vec<String> {
+    let mut tags: Vec<String> = Vec::new();
+    let lower = task_name.to_lowercase();
+
+    if subdir.contains("invest") {
+        tags.extend(["投资".into(), "日报".into()]);
+    } else if subdir.contains("boss") {
+        tags.extend(["创业".into(), "灵感".into()]);
+    } else if subdir.contains("news") || subdir.contains("hot") {
+        tags.extend(["科技".into(), "热点".into()]);
+    } else if subdir.contains("tech") {
+        tags.extend(["编程".into(), "笔记".into()]);
+    } else if subdir.contains("thinking") {
+        tags.extend(["思考".into(), "复盘".into()]);
+    } else if subdir.contains("reference") {
+        tags.extend(["参考".into(), "教程".into()]);
+    }
+
+    let keyword_tags: &[(&[&str], &str)] = &[
+        (&["ai", "大模型", "llm", "gpt", "模型"], "AI"),
+        (&["python"], "tech:python"),
+        (&["rust"], "tech:rust"),
+        (&["rag", "检索", "embedding"], "tech:rag"),
+        (&["prompt", "提示词"], "tech:prompt"),
+    ];
+    for (keywords, tag) in keyword_tags {
+        if keywords.iter().any(|k| lower.contains(k)) {
+            let t: String = (*tag).into();
+            if !tags.contains(&t) { tags.push(t); }
+        }
+    }
+
+    let proj: String = "proj:auto-crab".into();
+    if !tags.contains(&proj) { tags.push(proj); }
+
+    tags
+}
+
 /// Save content to the Obsidian vault as a dated markdown file,
 /// automatically routed to the correct subdirectory.
-pub fn save_to_vault(knowledge: &config::KnowledgeConfig, task_name: &str, content: &str) {
+/// Follows the shared KNOWLEDGE-BASE-DESIGN spec (frontmatter, tags, structure).
+pub fn save_to_vault(
+    knowledge: &config::KnowledgeConfig,
+    task_name: &str,
+    content: &str,
+    summary: Option<&str>,
+) {
     use std::fs;
     let now = chrono::Local::now();
     let date_str = now.format("%Y-%m-%d").to_string();
@@ -594,20 +659,20 @@ pub fn save_to_vault(knowledge: &config::KnowledgeConfig, task_name: &str, conte
         .collect();
     let file_path = dir.join(format!("{}-{}.md", time_str, safe_name));
 
-    let tags: Vec<&str> = if subdir.contains("invest") {
-        vec!["投资", "日报"]
-    } else if subdir.contains("boss") {
-        vec!["创业", "灵感"]
-    } else if subdir.contains("news") {
-        vec!["科技", "热点"]
-    } else {
-        vec!["auto-crab"]
-    };
+    let tags = generate_vault_tags(&subdir, task_name);
+    let summary_str = summary.unwrap_or("");
 
     let md = format!(
-        "---\ntask: {}\ndate: {}\ntime: {}\ncategory: {}\ntags: [{}]\n---\n\n# {}\n\n{}\n",
-        task_name, date_str, now.format("%H:%M"), subdir,
-        tags.join(", "), task_name, content
+        "---\ntask: {task}\ndate: {date}\ntime: \"{time}\"\ncategory: {cat}\n\
+         tags: [{tags}]\nsource: auto-crab\nsummary: \"{summary}\"\nrelated: []\n\
+         ---\n\n# {task}\n\n{content}\n",
+        task = task_name,
+        date = date_str,
+        time = now.format("%H:%M"),
+        cat = subdir,
+        tags = tags.join(", "),
+        summary = summary_str,
+        content = content,
     );
 
     match fs::write(&file_path, &md) {
@@ -1374,7 +1439,7 @@ pub fn run() {
                                             // Save to Obsidian vault if configured
                                             if sched_cfg.knowledge.enabled && !sched_cfg.knowledge.vault_path.is_empty() {
                                                 if let Ok(ref text) = result {
-                                                    save_to_vault(&sched_cfg.knowledge, &job.name, text);
+                                                    save_to_vault(&sched_cfg.knowledge, &job.name, text, None);
                                                 }
                                             }
 

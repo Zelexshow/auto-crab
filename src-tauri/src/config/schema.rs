@@ -373,6 +373,9 @@ fn default_vault_routing() -> HashMap<String, String> {
     m.insert("invest".into(), "invest-explore".into());
     m.insert("boss".into(), "boss-explore".into());
     m.insert("news".into(), "hot-news".into());
+    m.insert("tech".into(), "tech-notes".into());
+    m.insert("thinking".into(), "thinking".into());
+    m.insert("reference".into(), "reference".into());
     m
 }
 

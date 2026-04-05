@@ -317,7 +317,7 @@ pub async fn save_to_knowledge_base(
     if !cfg.knowledge.enabled || cfg.knowledge.vault_path.is_empty() {
         return ApiResult::err("知识库未启用或路径未配置");
     }
-    crate::save_to_vault(&cfg.knowledge, &title, &content);
+    crate::save_to_vault(&cfg.knowledge, &title, &content, None);
     ApiResult::ok("已保存到知识库".into())
 }
 
